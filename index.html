@@ -1,0 +1,1373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#f2f0ea">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Squish</title>
+<!-- Creature and nucleus paper: fragments of 20 public-domain maps from Wikimedia Commons —
+  Esquisse d'une carte géologique d'Italie (1844); André Dumont, Carte géologique de l'Europe (1857);
+  Nicholson & Marr, Geological map of the Cross Fell Inlier (1891); Olaus Magnus, Carta Marina (1539);
+  Piri Reis world map (1513); Abraham Cresques, Catalan Atlas (1375); Fernão Vaz Dourado chart (1570);
+  Kunyu Wanguo Quantu (17th c.); Jos Murer, Murerplan of Zürich (1576); Map of Edo (1844–48);
+  Turgot map of Paris (1739); S.D.U.K. Map of Calcutta (1842); Topographischer Atlas des Königreichs
+  Württemberg (1851); Carte d'État-major de la France, Foix N.E. (1866); Reymann's map, Kalwaria (1875);
+  US Army Map Service, Asmara (1943); Woodbridge isothermal chart (1823); Waldseemüller world map (1507);
+  Cedid Atlas, Middle East (1803); Ocean currents (1943). -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;600&display=swap">
+<style>
+/* Layout: one full-screen 3D sheet of graph paper; cells and creatures in WebGL, pencil notes on a canvas above, two pencilled buttons in the corner.
+   A single light look on purpose: it is a sheet of paper under a lamp. */
+:root {
+  --paper: #f2f0ea;
+  --ink: #34353a;
+  --soft: #6f6e6a;
+  --hand: "Caveat", "Segoe Print", "Bradley Hand", cursive;
+}
+html, body { height: 100%; }
+body {
+  background: var(--paper); color: var(--ink); overflow: hidden; overscroll-behavior: none;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+}
+#stage { position: fixed; inset: 0; }
+#stage canvas { display: block; touch-action: none; outline: none; }
+#stage canvas:focus-visible { outline: 2px dashed var(--soft); outline-offset: -6px; }
+#ink { position: fixed; inset: 0; pointer-events: none; }
+#loading { position: fixed; inset: 0; display: grid; place-items: center; font: 400 28px var(--hand); color: var(--soft); }
+.tools {
+  position: fixed; z-index: 2; display: flex; gap: 14px;
+  top: calc(env(safe-area-inset-top, 0px) + 10px); right: max(16px, env(safe-area-inset-right, 0px));
+}
+.tools button {
+  font: 600 22px/1 var(--hand); color: var(--soft); background: none; border: 0; padding: 6px 2px; cursor: pointer;
+  text-decoration: underline wavy; text-decoration-thickness: 1px; text-underline-offset: 5px;
+}
+.tools button:hover { color: var(--ink); }
+.tools button:focus-visible { outline: 2px dashed var(--soft); outline-offset: 3px; }
+#hint {
+  position: fixed; z-index: 2; left: 0; right: 0; text-align: center; pointer-events: none;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 22px);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  font: 400 25px/1.1 var(--hand); color: var(--soft); transition: opacity .6s; text-wrap: balance;
+}
+</style>
+<style>html{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}</style>
+</head>
+<body>
+<div id="stage"></div>
+<canvas id="ink" aria-hidden="true"></canvas>
+<div id="loading">folding paper…</div>
+<div class="tools">
+  <button id="snd" type="button" aria-pressed="true">sound on</button>
+  <button id="again" type="button">start over</button>
+</div>
+<div id="hint" aria-live="polite"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+const GENES = [
+  ["legs", "Leg pairs"], ["bulk", "Bulk"], ["stride", "Leg length"], ["tone", "Second map"], ["speed", "Pace"],
+  ["aggr", "Aggression"], ["neck", "Neck"], ["wings", "Wings"], ["crumple", "Crumple"], ["print", "Main map"], ["life", "Longevity"], ["form", "Form"],
+];
+const G = Object.fromEntries(GENES.map((g, i) => [g[0], i]));
+const rnd = (a, b) => a + Math.random() * (b - a);
+const lerp = (a, b, t) => a + (b - a) * t;
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const clamp01 = v => Math.min(1, Math.max(0, v));
+const gauss = () => { let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+const ease = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+// ---------- scene ----------
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const TAU = Math.PI * 2;
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+const stageEl = document.getElementById("stage"); stageEl.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const PAPER = 0xf2f0ea; scene.background = new THREE.Color(PAPER);
+const camera = new THREE.PerspectiveCamera(38, 1, 0.5, 300);
+const hemi = new THREE.HemisphereLight(0xffffff, 0x8a857c, 0.6); scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xffffff, 0.68);
+sun.position.set(-9, 22, -4); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -40, right: 40, top: 40, bottom: -40, near: 1, far: 90 }); sun.shadow.camera.updateProjectionMatrix();
+sun.shadow.bias = -0.0005; scene.add(sun, sun.target);
+// a soft studio for the cell walls to catch highlights from
+let ENV = null;
+{
+  const pm = new THREE.PMREMGenerator(renderer), env = new THREE.Scene();
+  env.add(new THREE.Mesh(new THREE.BoxGeometry(30, 30, 30), new THREE.MeshBasicMaterial({ color: 0x9a968e, side: THREE.BackSide })));
+  const panel = (w, h, x, y, z, k) => { const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ side: THREE.DoubleSide })); m.material.color.setScalar(k); m.position.set(x, y, z); m.lookAt(0, 0, 0); env.add(m); };
+  panel(14, 8, -6, 13, -4, 6); panel(6, 10, 13, 4, 6, 2.5); panel(20, 4, 0, -12, 0, 0.8);
+  ENV = pm.fromScene(env, 0.04).texture; // only the cell walls reflect it; the paper stays matt
+}
+
+// graph paper: pencil lines, a little irregular, repeated across the floor
+function gridTexture() {
+  const N = 1024, cv = document.createElement("canvas"); cv.width = cv.height = N;
+  const g = cv.getContext("2d"); g.fillStyle = "#f2f0ea"; g.fillRect(0, 0, N, N);
+  for (let i = 0; i < 1400; i++) { g.strokeStyle = `rgba(60,55,48,${rnd(0.015, 0.05)})`; g.lineWidth = rnd(0.4, 1); const x = rnd(0, N), y = rnd(0, N), a = rnd(0, 6.28), l = rnd(3, 12); g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke(); }
+  const cells = 2, st = N / cells;
+  for (let i = 0; i < cells; i++) for (const vert of [0, 1]) for (let pass = 0; pass < 2; pass++) {
+    const c0 = i * st + 1 + rnd(-1.5, 1.5);
+    g.beginPath();
+    for (let k = 0; k <= 16; k++) { const t = k / 16 * N, w = c0 + Math.sin(k * 1.7 + i + pass) * 1.2; vert ? (k ? g.lineTo(w, t) : g.moveTo(w, t)) : (k ? g.lineTo(t, w) : g.moveTo(t, w)); }
+    g.lineWidth = pass ? 3 : 6; g.strokeStyle = `rgba(70,74,82,${pass ? 0.14 : 0.3})`; g.stroke();
+  }
+  const t = new THREE.CanvasTexture(cv); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.encoding = THREE.sRGBEncoding;
+  t.anisotropy = renderer.capabilities.getMaxAnisotropy(); t.repeat.set(48, 48); // one tile = two squares of 2.5 units
+  return t;
+}
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(240, 240), new THREE.MeshStandardMaterial({ map: gridTexture(), roughness: 1 }));
+floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+
+
+// ---------- the paper brood: folded map-paper creatures (from Paper Brood) ----------
+// ---------- paper ----------
+function makePaperTex(printed) {
+  const N = 512, cv = document.createElement("canvas"); cv.width = cv.height = N;
+  const ctx = cv.getContext("2d");
+  ctx.fillStyle = "#fbfaf7"; ctx.fillRect(0, 0, N, N);
+  for (let i = 0; i < 900; i++) { // fibres
+    ctx.strokeStyle = `rgba(60,55,48,${rnd(0.02, 0.07)})`; ctx.lineWidth = rnd(0.4, 1.1);
+    const x = rnd(0, N), y = rnd(0, N), a = rnd(0, 6.28), l = rnd(3, 14);
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); ctx.stroke();
+  }
+  if (printed) { // newsprint: two columns of tiny grey word-bars and the odd headline
+    for (let col = 0; col < 2; col++) {
+      const x0 = 18 + col * 250, x1 = x0 + 226;
+      for (let y = 20; y < N - 12; y += 9) {
+        const head = Math.random() < 0.05, h = head ? 6 : 3;
+        let x = x0;
+        while (x < x1 - 10) {
+          const w = Math.min(rnd(8, head ? 46 : 26), x1 - x);
+          ctx.fillStyle = `rgba(28,27,25,${head ? 0.7 : rnd(0.35, 0.55)})`; ctx.fillRect(x, y, w, h);
+          x += w + rnd(4, 7);
+        }
+        if (head) y += 6;
+      }
+    }
+  }
+  const t = new THREE.CanvasTexture(cv); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.encoding = THREE.sRGBEncoding; t.anisotropy = 4;
+  return t;
+}
+const plainPaper = makePaperTex(false);
+// fragments cut from twenty public-domain maps on Wikimedia Commons, two from each: one 8 x 5 sheet, sliced into forty paper textures
+let MAPS = [plainPaper];
+function loadMaps() {
+  return new Promise(res => {
+    const img = new Image();
+    img.onload = () => {
+      const COLS = 8, ROWS = 5, T = img.width / COLS, tiles = [];
+      for (let i = 0; i < COLS * ROWS; i++) {
+        const cv = document.createElement("canvas"); cv.width = cv.height = 512;
+        cv.getContext("2d").drawImage(img, (i % COLS) * T, Math.floor(i / COLS) * T, T, T, 0, 0, 512, 512);
+        const t = new THREE.CanvasTexture(cv); t.wrapS = t.wrapT = THREE.MirroredRepeatWrapping; t.encoding = THREE.sRGBEncoding; t.anisotropy = 4;
+        tiles.push(t);
+      }
+      MAPS = tiles; res();
+    };
+    img.onerror = () => res();
+    img.src = "maps.jpg";
+  });
+}
+const mapOf = v => MAPS[Math.min(MAPS.length - 1, Math.floor(v * MAPS.length))];
+
+// Map paper is laid on each facet with its own flat projection, so no facet is ever smeared or stretched.
+// The projection keeps "up" pointing the same way on every facet and starts from where the facet sits on
+// the body, so neighbouring facets show neighbouring parts of the map, like one sheet folded.
+// UV_SCALE is map tiles per world unit; buildBody sets it per creature so small creatures still show a
+// readable piece of their map.
+let UV_SCALE = 0.45;
+function paperGeo(tris, off = [0, 0], stretchY = 1) {
+  const pos = [], uv = [], k = UV_SCALE;
+  for (const t of tris) {
+    const P = t.map(v => [v[0], v[1] * stretchY, v[2]]); // the shape it is shown at (legs are stretched later)
+    const e1 = [P[1][0] - P[0][0], P[1][1] - P[0][1], P[1][2] - P[0][2]], e2 = [P[2][0] - P[0][0], P[2][1] - P[0][1], P[2][2] - P[0][2]];
+    let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+    const nl = Math.hypot(...n) || 1; n = n.map(x => x / nl);
+    const ref = Math.abs(n[1]) < 0.9 ? [0, 1, 0] : [0, 0, 1];
+    const rd = ref[0] * n[0] + ref[1] * n[1] + ref[2] * n[2];
+    let vAx = [ref[0] - n[0] * rd, ref[1] - n[1] * rd, ref[2] - n[2] * rd];
+    const vl = Math.hypot(...vAx) || 1; vAx = vAx.map(x => x / vl);
+    const uAx = [vAx[1] * n[2] - vAx[2] * n[1], vAx[2] * n[0] - vAx[0] * n[2], vAx[0] * n[1] - vAx[1] * n[0]];
+    const cen = [0, 1, 2].map(i => (P[0][i] + P[1][i] + P[2][i]) / 3);
+    const ax = Math.abs(n[0]), ay = Math.abs(n[1]), az = Math.abs(n[2]);
+    const base = ax >= ay && ax >= az ? [cen[2], cen[1]] : ay >= az ? [cen[0], cen[2]] : [cen[0], cen[1]];
+    t.forEach((v, i) => {
+      pos.push(v[0], v[1], v[2]);
+      const d = [P[i][0] - cen[0], P[i][1] - cen[1], P[i][2] - cen[2]];
+      uv.push(off[0] + (base[0] + d[0] * uAx[0] + d[1] * uAx[1] + d[2] * uAx[2]) * k,
+              off[1] + (base[1] + d[0] * vAx[0] + d[1] * vAx[1] + d[2] * vAx[2]) * k);
+    });
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  g.computeVertexNormals();
+  return g;
+}
+// a leg is a long triangular fold, along y from 0 to 1; len is about how long it is drawn, so its paper isn't stretched
+function legGeo(r0, r1, len = 1) {
+  const ang = [0.5, 2.594, 4.689];
+  const bot = ang.map(a => [Math.cos(a) * r0, 0, Math.sin(a) * r0]);
+  const tris = [];
+  if (r1 <= 0) for (let i = 0; i < 3; i++) tris.push([bot[i], bot[(i + 1) % 3], [0, 1, 0]]);
+  else {
+    const top = ang.map(a => [Math.cos(a) * r1, 1, Math.sin(a) * r1]);
+    for (let i = 0; i < 3; i++) { const j = (i + 1) % 3; tris.push([bot[i], bot[j], top[j]], [bot[i], top[j], top[i]]); }
+  }
+  return paperGeo(tris, [Math.random(), Math.random()], len);
+}
+// ---------- genome ----------
+// five kinds of creature; the form gene decides which, so a mutation or a mixed birth can turn one kind into another
+const FORMS = ["walker", "floater", "crawler", "hopper", "roller"];
+const randomGenome = () => GENES.map(() => Math.random());
+function breed(a, b, rate) {
+  return a.map((g, i) => {
+    let v = Math.random() < 0.5 ? g : b[i];
+    if (Math.random() < 0.15) v = (g + b[i]) / 2;
+    if (Math.random() < rate) v += gauss() * 0.2;
+    return clamp01(v);
+  });
+}
+const S = 1;
+const pheno = g => ({
+  form: FORMS[Math.min(FORMS.length - 1, Math.floor(g[G.form] * FORMS.length))],
+  count: g[G.legs],
+  pairs: g[G.legs] < 0.5 ? 2 : 3,
+  bulk: lerp(0.6, 1.25, g[G.bulk]) * S,
+  stride: g[G.stride],
+  leg: lerp(0.8, 1.8, g[G.stride]) * S,
+  tone: g[G.tone],
+  speed: lerp(0.9, 2.3, g[G.speed]),
+  gait: lerp(3, 6.5, g[G.speed]),
+  aggr: g[G.aggr],
+  neck: lerp(0.2, 1.3, g[G.neck]),
+  neckG: g[G.neck],
+  wings: g[G.wings],
+  crumple: g[G.crumple],
+  print: g[G.print],
+});
+const MUT = 0.18;
+// the brood is tiny beside the elephant: about half the height of its knee
+const PACE = { walker: 1, floater: 0.65, crawler: 0.6, hopper: 1, roller: 1.15 };
+const TURN = { walker: 2.2, floater: 1.1, crawler: 2.6, hopper: 0, roller: 1.6 };
+// ---------- building bodies ----------
+let creatures = [], scraps = [], meetings = [], nextId = 1, simT = 0;
+const legRoot = new THREE.Group(); scene.add(legRoot);
+const tmp = { a: new THREE.Vector3(), c: new THREE.Vector3(), x: new THREE.Vector3(), y: new THREE.Vector3(), z: new THREE.Vector3() };
+
+function verts(J) {
+  const V = {}, jit = () => [(Math.random() - 0.5) * J, (Math.random() - 0.5) * J, (Math.random() - 0.5) * J];
+  return {
+    V,
+    set: (n, x, y, z) => { const j = jit(); V[n] = [x + j[0], y + j[1], z + j[2]]; },
+    pair: (n, x, y, z) => { const j = jit(); V["L" + n] = [-x + j[0], y + j[1], z + j[2]]; V["R" + n] = [x - j[0], y + j[1], z + j[2]]; },
+    T: (a, b, d) => [V[a], V[b], V[d]],
+  };
+}
+function addPart(c, parent, geo, mat, edges = true) {
+  const m = new THREE.Mesh(geo, mat); m.castShadow = true; m.receiveShadow = true; m.userData.creature = c;
+  if (edges) m.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo, 6), c.lineMat));
+  parent.add(m); return m;
+}
+function makeLegs(c, specs, lr) {
+  const len = c.p.leg * 0.55;
+  c.thighGeo = legGeo(lr, lr * 0.65, len); c.shinGeo = legGeo(lr * 0.65, 0, len);
+  for (const s of specs) {
+    const thigh = new THREE.Mesh(c.thighGeo, c.mat2), shin = new THREE.Mesh(c.shinGeo, c.mat2);
+    for (const m of [thigh, shin]) { m.matrixAutoUpdate = false; m.castShadow = true; legRoot.add(m); }
+    c.legs.push({ ...s, thigh, shin, down: true });
+  }
+}
+
+function buildBody(c) {
+  c.p = pheno(c.genome);
+  // folded from map fragments: the body from one map, wings, legs and stripes from another
+  c.color = new THREE.Color(0.96, 0.95, 0.93);
+  c.mat = new THREE.MeshStandardMaterial({ color: c.color, map: mapOf(c.p.print), flatShading: true, side: THREE.DoubleSide, roughness: 0.88 });
+  c.mat2 = new THREE.MeshStandardMaterial({ color: c.color, map: mapOf(c.p.tone), flatShading: true, side: THREE.DoubleSide, roughness: 0.88 });
+  c.lineMat = new THREE.LineBasicMaterial({ color: 0x2a2826, transparent: true, opacity: 0.4 });
+  c.body = new THREE.Group(); c.body.userData.creature = c; scene.add(c.body);
+  c.legs = []; c.wingL = c.wingR = null; c.tassels = []; c.segs = null; c.segGroup = null; c.spin = null;
+  UV_SCALE = 0.4 / c.p.bulk; // a body shows roughly half a map fragment, whatever its size
+  ({ walker: buildWalker, floater: buildFloater, crawler: buildCrawler, hopper: buildHopper, roller: buildRoller })[c.p.form](c);
+  UV_SCALE = 0.45;
+}
+
+// walker: a ridged envelope body, a neck and pointed head, a valley-fold tail, legs, sometimes wings
+function buildWalker(c) {
+  const p = c.p, B = p.bulk, L = 0.9 * B, W = 0.42 * B, H = 0.55 * B;
+  const { set, pair, T } = verts(p.crumple * 0.22 * B);
+  set("F", 0, 0.1 * H, L); set("T1", 0, H, 0.3 * L); set("T2", 0, 0.82 * H, -0.45 * L); set("B", 0, 0.2 * H, -L); set("D", 0, -0.45 * H, -0.05 * L);
+  pair("F", W, 0, 0.3 * L); pair("B", 0.85 * W, 0.05 * H, -0.5 * L);
+  const nl = p.neck * B, ny = 0.72 * H, nz = 0.6 * L, ty = ny + nl * 0.85, tz = nz + nl * 0.5, r = 0.11 * B, r2 = 0.06 * B;
+  pair("n", r, ny, nz - r * 0.5); set("n3", 0, ny + 0.05 * H, nz + r);
+  pair("m", r2, ty, tz - r2 * 0.5); set("m3", 0, ty + 0.02 * B, tz + r2);
+  set("A", 0, ty - 0.1 * B, tz + 0.45 * B); set("C", 0, ty + 0.22 * B, tz - 0.12 * B);
+  set("Tt", 0, 0.2 * H + 0.4 * B, -L - 0.35 * B); pair("t", 0.13 * B, 0.3 * H, -L + 0.18 * B);
+  addPart(c, c.body, paperGeo([
+    T("F", "T1", "LF"), T("F", "RF", "T1"), T("T1", "T2", "LB"), T("T1", "LB", "LF"), T("T1", "RF", "RB"), T("T1", "RB", "T2"), T("T2", "B", "LB"), T("T2", "RB", "B"),
+    T("F", "LF", "D"), T("F", "D", "RF"), T("LF", "LB", "D"), T("RF", "D", "RB"), T("LB", "B", "D"), T("RB", "D", "B"),
+    T("Ln", "Rn", "Rm"), T("Ln", "Rm", "Lm"), T("Rn", "n3", "m3"), T("Rn", "m3", "Rm"), T("n3", "Ln", "Lm"), T("n3", "Lm", "m3"),
+    T("Lm", "m3", "A"), T("m3", "Rm", "A"), T("Rm", "Lm", "A"), T("Lm", "Rm", "C"),
+    T("B", "Lt", "Tt"), T("B", "Tt", "Rt"),
+  ], c.uvOff), c.mat);
+  c.topY = Math.max(H, ty + 0.22 * B);
+  if (p.wings > 0.4) {
+    const span = (p.wings - 0.2) * 1.3 * B;
+    for (const side of [-1, 1]) {
+      const w = addPart(c, c.body, paperGeo([
+        [[0, 0, 0.35 * L], [side * span * 0.5, 0.12 * B, 0.08 * L], [0, -0.03 * H, -0.32 * L]],
+        [[side * span * 0.5, 0.12 * B, 0.08 * L], [side * span, 0.22 * B, -0.15 * L], [0, -0.03 * H, -0.32 * L]],
+      ], c.uvOff), c.mat2);
+      w.position.set(0, 0.86 * H, -0.1 * L);
+      if (side < 0) c.wingL = w; else c.wingR = w;
+    }
+  }
+  const zs = p.pairs === 2 ? [0.5 * L, -0.5 * L] : [0.55 * L, 0, -0.55 * L], specs = [];
+  zs.forEach((z, k) => { for (const side of [-1, 1]) specs.push({ hip: new THREE.Vector3(side * 0.75 * W, -0.05 * H, z), side, phase: (k % 2 ? Math.PI : 0) + (side > 0 ? Math.PI : 0) + rnd(-0.3, 0.3) }); });
+  makeLegs(c, specs, 0.06 * B + 0.025 * S);
+  c.hipH = p.leg * 0.78;
+}
+
+// floater: a paper crane that drifts above the grid, wings beating slowly, paper tassels hanging under it
+function buildFloater(c) {
+  const p = c.p, B = p.bulk * 0.9, L = 0.75 * B, H = 0.3 * B, W = 0.22 * B;
+  const { set, pair, T } = verts(p.crumple * 0.15 * B);
+  set("F", 0, 0.05 * H, L * 0.55); set("K", 0, 0.1 * H, -L * 0.55); set("T", 0, H, 0); set("D", 0, -0.9 * H, 0); pair("S", W, 0, 0);
+  const nTop = 0.35 * B + p.neck * 0.7 * B, nz = L * 0.55 + 0.45 * B;
+  set("Nt", 0, nTop, nz); set("Hb", 0, nTop - 0.12 * B, nz + 0.3 * B); set("Tt", 0, 0.3 * B + p.neck * 0.4 * B, -L * 0.55 - 0.6 * B);
+  pair("f", 0.05 * B, 0.05 * H, L * 0.5); pair("k", 0.05 * B, 0.1 * H, -L * 0.5); pair("h", 0.035 * B, nTop, nz);
+  addPart(c, c.body, paperGeo([
+    T("T", "F", "LS"), T("T", "RS", "F"), T("T", "LS", "K"), T("T", "K", "RS"), T("D", "LS", "F"), T("D", "F", "RS"), T("D", "K", "LS"), T("D", "RS", "K"),
+    T("Lf", "Rf", "Nt"), T("Lh", "Rh", "Hb"), T("Lk", "Rk", "Tt"),
+  ], c.uvOff), c.mat);
+  const span = lerp(0.9, 2.4, p.wings) * B;
+  for (const side of [-1, 1]) {
+    const w = addPart(c, c.body, paperGeo([
+      [[0, 0, 0.5 * L], [side * span * 0.45, 0.05 * B, 0.15 * L], [0, 0, -0.45 * L]],
+      [[side * span * 0.45, 0.05 * B, 0.15 * L], [side * span, -0.05 * B, -0.35 * L], [0, 0, -0.45 * L]],
+    ], c.uvOff), c.mat2);
+    w.position.set(0, 0.6 * H, 0);
+    if (side < 0) c.wingL = w; else c.wingR = w;
+  }
+  const n = 2 + Math.round(p.count * 5);
+  for (let i = 0; i < n; i++) {
+    const len = rnd(0.5, 1.3) * B;
+    const t = addPart(c, c.body, paperGeo([
+      [[-0.05 * B, 0, 0], [0.05 * B, 0, 0], [0, -len, 0.03]],
+      [[0.05 * B, 0, 0], [0, -len, 0.03], [0.02 * B, -len * 0.6, -0.04]],
+    ], c.uvOff), i % 2 ? c.mat : c.mat2, false);
+    t.position.set(rnd(-W, W) * 0.8, -0.6 * H, rnd(-L * 0.4, L * 0.4));
+    c.tassels.push(t);
+  }
+  c.topY = nTop + 0.2 * B;
+}
+
+// crawler: a chain of folded tents that slithers, striped in its two maps, with feelers on the head
+function tentGeo(B, J, head, neck, off) {
+  const w = 0.3 * B, l = 0.2 * B, h = 0.34 * B, { set, pair, T, V } = verts(J);
+  pair("F", w, 0, l); pair("K", w, 0, -l); set("Tf", 0, h, l * 0.7); set("Tb", 0, h * 0.9, -l * 0.7);
+  const tris = [T("LF", "Tf", "Tb"), T("LF", "Tb", "LK"), T("RF", "Tb", "Tf"), T("RF", "RK", "Tb"), T("LF", "RF", "Tf"), T("RK", "LK", "Tb")];
+  if (head) {
+    set("Sn", 0, 0.12 * B, l + 0.3 * B); tris.push(T("LF", "RF", "Sn"), T("LF", "Sn", "Tf"), T("RF", "Tf", "Sn"));
+    for (const s of [-1, 1]) {
+      const a = [V.Tf[0] + s * 0.03, V.Tf[1], V.Tf[2]], b = [V.Tf[0] + s * 0.07, V.Tf[1], V.Tf[2] - 0.02];
+      tris.push([a, b, [s * 0.22 * B, h + (0.2 + 0.4 * neck) * B, l + 0.35 * B]]);
+    }
+  }
+  return paperGeo(tris, off);
+}
+function buildCrawler(c) {
+  const p = c.p, B = p.bulk, n = 4 + Math.round(p.count * 6), J = p.crumple * 0.12 * B;
+  addPart(c, c.body, tentGeo(B, J, true, p.neckG, c.uvOff), c.mat);
+  c.segGroup = new THREE.Group(); c.segGroup.userData.creature = c; scene.add(c.segGroup);
+  c.segs = [];
+  const segGeo = tentGeo(B, J, false, 0, c.uvOff);
+  for (let i = 1; i <= n; i++) {
+    const m = addPart(c, c.segGroup, segGeo, i % 2 ? c.mat2 : c.mat);
+    m.userData.taper = 1 - (i / n) * 0.45; c.segs.push(m);
+  }
+  c.segSpacing = 0.42 * B;
+  c.topY = 0.34 * B + (0.3 + 0.4 * p.neckG) * B;
+  if (c.trail.length < 2) for (let i = 0; i < 80; i++) c.trail.push({ x: c.x - Math.sin(c.yaw) * i * 0.06, z: c.z - Math.cos(c.yaw) * i * 0.06 });
+}
+
+// hopper: a squat folded frog with big back legs; it crouches, then jumps
+function buildHopper(c) {
+  const p = c.p, B = p.bulk, L = 0.6 * B, W = 0.5 * B, H = 0.34 * B;
+  const { set, pair, T } = verts(p.crumple * 0.18 * B);
+  set("F", 0, 0.15 * H, L); set("T", 0, H, 0.05 * L); set("K", 0, 0.35 * H, -L); set("D", 0, -0.35 * H, 0);
+  pair("F", 0.8 * W, 0, 0.35 * L); pair("B", W, 0.05 * H, -0.45 * L);
+  pair("e", 0.2 * B, 0.75 * H, 0.6 * L); pair("E", 0.22 * B, 0.75 * H + 0.22 * B, 0.5 * L); pair("x", 0.32 * B, 0.7 * H, 0.35 * L);
+  addPart(c, c.body, paperGeo([
+    T("F", "T", "LF"), T("F", "RF", "T"), T("T", "LB", "LF"), T("T", "RF", "RB"), T("T", "K", "LB"), T("T", "RB", "K"),
+    T("F", "LF", "D"), T("F", "D", "RF"), T("LF", "LB", "D"), T("RF", "D", "RB"), T("LB", "K", "D"), T("RB", "D", "K"),
+    T("Le", "LE", "Lx"), T("Re", "Rx", "RE"),
+  ], c.uvOff), c.mat);
+  const specs = [];
+  for (const side of [-1, 1]) {
+    specs.push({ hip: new THREE.Vector3(side * 0.85 * W, 0, -0.45 * L), side, back: true });
+    specs.push({ hip: new THREE.Vector3(side * 0.6 * W, -0.1 * H, 0.45 * L), side, back: false });
+  }
+  makeLegs(c, specs, 0.07 * B + 0.02 * S);
+  c.topY = H + 0.35 * B;
+}
+
+// roller: a folded paper star that tumbles across the grid
+function buildRoller(c) {
+  const p = c.p, B = p.bulk, R = 0.42 * B, spike = lerp(1.25, 2, p.neckG);
+  const base = p.count < 0.45 ? new THREE.OctahedronGeometry(R, 0) : new THREE.IcosahedronGeometry(R, 0);
+  const a = base.attributes.position, tris = [];
+  for (let i = 0; i < a.count; i += 3) {
+    const v = [0, 1, 2].map(k => [a.getX(i + k), a.getY(i + k), a.getZ(i + k)]);
+    const cen = [0, 1, 2].map(k => (v[0][k] + v[1][k] + v[2][k]) / 3), len = Math.hypot(...cen);
+    const s = R * spike * (1 + (Math.random() - 0.5) * p.crumple * 0.5) / len, apex = cen.map(x => x * s);
+    tris.push([v[0], v[1], apex], [v[1], v[2], apex], [v[2], v[0], apex]);
+  }
+  base.dispose();
+  c.spin = new THREE.Group(); c.body.add(c.spin);
+  addPart(c, c.spin, paperGeo(tris, c.uvOff), c.mat);
+  c.rollR = R * (1 + spike) * 0.48;
+  c.topY = R * spike * 1.6;
+}
+
+function destroyBody(c) {
+  scene.remove(c.body);
+  c.body.traverse(o => { if (o.geometry) o.geometry.dispose(); });
+  if (c.segGroup) { scene.remove(c.segGroup); c.segGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); }); c.segGroup = null; }
+  for (const L of c.legs) legRoot.remove(L.thigh, L.shin);
+  if (c.thighGeo) { c.thighGeo.dispose(); c.shinGeo.dispose(); c.thighGeo = c.shinGeo = null; }
+  c.mat.dispose(); c.mat2.dispose(); c.lineMat.dispose();
+}
+// ---------- posing ----------
+function pose(c, paused, dt) {
+  const p = c.p, k = Math.max(0.02, Math.min(1, c.k)) * c.grow;
+  const f = { sx: k, sy: k, legK: k, tilt: 0, drop: 0, k };
+  if (c.dying) {
+    const s = ease(Math.min(1, c.dying.t / 1.2));
+    f.sx = f.sy = f.legK = Math.max(0.05, 1 - 0.92 * s); f.tilt = c.dying.tilt * s; f.drop = s;
+  }
+  f.fx = Math.sin(c.yaw); f.fz = Math.cos(c.yaw);
+  f.sh = c.shake ? (Math.random() - 0.5) * c.shake : 0;
+  ({ walker: poseWalker, floater: poseFloater, crawler: poseCrawler, hopper: poseHopper, roller: poseRoller })[p.form](c, paused, dt, f);
+  if (c.elderT > 0 && p.form !== "roller") c.body.rotation.x += 0.18 * c.elderT;
+  if (c.pop > 0) { c.pop = Math.max(0, c.pop - dt * 2.5); c.body.scale.multiplyScalar(1 + 0.12 * Math.sin(Math.PI * c.pop)); }
+}
+function place(mesh, a, b, fwd) {
+  const y = tmp.y.subVectors(b, a); const len = y.length() || 1e-3; y.divideScalar(len);
+  const x = tmp.x.copy(fwd).addScaledVector(y, -fwd.dot(y)).normalize();
+  const z = tmp.z.crossVectors(x, y);
+  mesh.matrix.makeBasis(x, y.multiplyScalar(len), z).setPosition(a);
+  mesh.matrixWorldNeedsUpdate = true;
+}
+function poseWalker(c, paused, dt, f) {
+  const p = c.p, wt = c.walkT, B = p.bulk;
+  const bob = paused ? Math.sin(simT * 1.6 + c.id) * 0.015 * p.leg : Math.abs(Math.sin(wt * p.gait)) * 0.06 * p.leg;
+  c.body.position.set(c.x + f.fx * c.lunge + f.sh, (c.hipH + bob) * f.legK + (1 - f.legK) * 0.12 * B, c.z + f.fz * c.lunge + f.sh);
+  c.body.scale.set(f.sx, f.sy, f.sx);
+  c.body.rotation.set(paused ? 0 : Math.sin(wt * p.gait * 0.5) * 0.04, c.yaw, f.tilt + (paused ? 0 : Math.sin(wt * p.gait) * 0.04));
+  if (c.wingL) {
+    const a = c.dying ? 0 : paused ? 0.2 + Math.sin(simT * 2 + c.id) * 0.05 : 0.35 + 0.45 * Math.sin(wt * p.gait * 1.6);
+    c.wingL.rotation.z = -a; c.wingR.rotation.z = a;
+  }
+  c.body.updateMatrixWorld();
+  const fwd = tmp.c.set(f.fx, 0, f.fz), sideBase = new THREE.Vector3(f.fz, 0, -f.fx);
+  for (const L of c.legs) {
+    const hip = tmp.a.copy(L.hip).applyMatrix4(c.body.matrixWorld);
+    const side = sideBase.clone().multiplyScalar(L.side);
+    const ph = wt * p.gait + L.phase, swing = paused ? 0 : Math.sin(ph);
+    const foot = new THREE.Vector3(c.x, 0, c.z).addScaledVector(side, (0.32 * B + p.leg * 0.5) * f.legK)
+      .addScaledVector(fwd, L.hip.z + swing * p.leg * 0.3 * f.legK);
+    foot.y = paused ? 0 : Math.max(0, Math.cos(ph)) * p.leg * 0.2;
+    const knee = hip.clone().lerp(foot, 0.42).addScaledVector(side, p.leg * 0.22 * f.legK); knee.y += p.leg * 0.28 * f.legK;
+    place(L.thigh, hip, knee, fwd); place(L.shin, knee, foot, fwd);
+    const down = foot.y < 0.01;
+    if (down && !L.down && !paused) stamp(foot.x, foot.z);
+    L.down = down;
+  }
+}
+function poseFloater(c, paused, dt, f) {
+  const p = c.p, B = p.bulk;
+  const target = (c.meeting || c.forming) ? 0.7 + 0.3 * B : lerp(1.6, 3.4, p.stride);
+  c.alt = c.alt == null ? target : lerp(c.alt, target, Math.min(1, dt * 1.5));
+  let y = lerp(0.2, c.alt + Math.sin(simT * 1.3 + c.id) * 0.22, c.dying ? 1 : f.k);
+  y = lerp(y, 0.1, f.drop);
+  c.bank = lerp(c.bank, Math.max(-0.6, Math.min(0.6, -c.turnV * 0.5)), Math.min(1, dt * 3));
+  c.body.position.set(c.x + f.fx * c.lunge + f.sh, y, c.z + f.fz * c.lunge + f.sh);
+  c.body.scale.set(f.sx, f.sy, f.sx);
+  c.body.rotation.set(Math.sin(simT * 0.9 + c.id) * 0.06, c.yaw, c.bank + f.tilt);
+  const a = c.dying ? -0.2 : paused ? 0.15 + Math.sin(simT * 1.5 + c.id) * 0.1 : 0.2 + 0.55 * Math.sin(c.walkT * p.gait * 0.45);
+  c.wingL.rotation.z = -a; c.wingR.rotation.z = a;
+  c.tassels.forEach((t, i) => { t.rotation.x = Math.sin(simT * 2.1 + i) * 0.25 + (paused ? 0 : 0.3); t.rotation.z = Math.sin(simT * 1.7 + i * 1.3) * 0.2; });
+}
+function poseCrawler(c, paused, dt, f) {
+  const p = c.p, B = p.bulk, wt = c.walkT;
+  c.body.position.set(c.x + f.fx * c.lunge + f.sh, 0, c.z + f.fz * c.lunge + f.sh);
+  c.body.scale.set(f.sx, f.sy, f.sx);
+  c.body.rotation.set(0, c.moveDir, f.tilt);
+  let idx = 0, acc = 0, prev = { x: c.x, z: c.z };
+  c.segs.forEach((s, i) => {
+    const want = (i + 1) * c.segSpacing;
+    while (idx < c.trail.length - 1 && acc < want) { acc += Math.hypot(c.trail[idx + 1].x - c.trail[idx].x, c.trail[idx + 1].z - c.trail[idx].z); idx++; }
+    const q = c.trail[idx] || prev;
+    const hump = paused ? 0 : Math.max(0, Math.sin(wt * p.gait - (i + 1) * 0.8)) * 0.12 * B;
+    s.position.set(q.x, hump * f.sy, q.z);
+    s.rotation.set(0, Math.atan2(prev.x - q.x, prev.z - q.z) || c.moveDir, f.tilt);
+    const t = s.userData.taper; s.scale.set(f.sx * t, f.sy * t, f.sx * t);
+    prev = q;
+  });
+}
+function poseHopper(c, paused, dt, f) {
+  const p = c.p, B = p.bulk, h = c.hop, air = h.air, fr = air ? Math.min(1, h.t / h.dur) : 0;
+  const hopY = air ? Math.sin(Math.PI * fr) * lerp(0.5, 1.5, p.stride) * B : 0;
+  const squash = !air && !paused ? Math.max(0, 1 - h.t / 0.2) * 0.25 : 0;
+  c.body.position.set(c.x + f.fx * c.lunge + f.sh, (0.32 * B + hopY) * f.legK + 0.05 * S, c.z + f.fz * c.lunge + f.sh);
+  c.body.scale.set(f.sx * (1 + squash * 0.4), f.sy * (1 - squash), f.sx * (1 + squash * 0.4));
+  c.body.rotation.set(air ? -Math.cos(Math.PI * fr) * 0.35 : 0.08, c.yaw, f.tilt);
+  c.body.updateMatrixWorld();
+  const fwd = tmp.c.set(f.fx, 0, f.fz), sideBase = new THREE.Vector3(f.fz, 0, -f.fx), K = f.legK;
+  for (const L of c.legs) {
+    const hip = tmp.a.copy(L.hip).applyMatrix4(c.body.matrixWorld);
+    const side = sideBase.clone().multiplyScalar(L.side);
+    let foot, knee;
+    if (L.back) {
+      if (air) {
+        foot = hip.clone().addScaledVector(fwd, -0.95 * B * K).addScaledVector(side, 0.15 * B * K); foot.y -= 0.25 * B * K;
+        knee = hip.clone().lerp(foot, 0.5); knee.y += 0.1 * B * K;
+      } else {
+        foot = new THREE.Vector3(c.x, 0, c.z).addScaledVector(side, 0.6 * B * K).addScaledVector(fwd, -0.15 * B * K);
+        knee = hip.clone().lerp(foot, 0.5).addScaledVector(side, 0.2 * B * K).addScaledVector(fwd, -0.35 * B * K); knee.y += 0.35 * B * K;
+      }
+    } else {
+      if (air) { foot = hip.clone().addScaledVector(fwd, 0.35 * B * K); foot.y -= 0.2 * B * K; }
+      else foot = new THREE.Vector3(c.x, 0, c.z).addScaledVector(side, 0.4 * B * K).addScaledVector(fwd, 0.45 * B * K);
+      knee = hip.clone().lerp(foot, 0.5).addScaledVector(side, 0.08 * B * K); knee.y += 0.06 * B * K;
+    }
+    place(L.thigh, hip, knee, fwd); place(L.shin, knee, foot, fwd);
+  }
+}
+function poseRoller(c, paused, dt, f) {
+  const wob = paused ? 0 : Math.abs(Math.sin(c.rollA * 2.5)) * 0.06;
+  c.body.position.set(c.x + f.fx * c.lunge + f.sh, (c.rollR + wob) * f.sy, c.z + f.fz * c.lunge + f.sh);
+  c.body.scale.set(f.sx, f.sy, f.sx);
+  c.body.rotation.set(0, c.yaw, f.tilt);
+  c.spin.rotation.x = c.rollA;
+}
+const angleTo = (want, cur) => Math.atan2(Math.sin(want - cur), Math.cos(want - cur));
+const stamp = () => {}; // no footprints here
+// ---------- camera fit and the part of the floor on screen ----------
+const BOUNDS = { x0: -6, x1: 6, z0: -8, z1: 8 };
+const camR = new THREE.Vector3(), camU = new THREE.Vector3(), camF = new THREE.Vector3();
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+function floorAt(nx, ny) { ndc.set(nx, ny); ray.setFromCamera(ndc, camera); const p = new THREE.Vector3(); return ray.ray.intersectPlane(floorPlane, p) ? p : null; }
+// the camera pulls back as the colony grows: not at all for the first cell, then a little more with every division
+let zoom = 1;
+const zoomFor = n => n <= 1 ? 1 : 1 + 0.3 * Math.sqrt(n - 1);
+function fitCamera() {
+  const aspect = innerWidth / innerHeight;
+  const t = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const dist = zoom * Math.max(6.8 / (t * Math.min(aspect, 1.6)), 8.5 / t), el = THREE.MathUtils.degToRad(60);
+  camera.position.set(0, Math.sin(el) * dist, Math.cos(el) * dist); camera.lookAt(0, 0, 0.6); camera.updateProjectionMatrix();
+  camera.updateMatrixWorld();
+  camera.matrixWorld.extractBasis(camR, camU, camF);
+  const bl = floorAt(-1, -0.78), br = floorAt(1, -0.78), tl = floorAt(-1, 0.8), tr = floorAt(1, 0.8);
+  if (bl && br && tl && tr) Object.assign(BOUNDS, { x0: Math.max(bl.x, tl.x), x1: Math.min(br.x, tr.x), z0: Math.max(tl.z, tr.z), z1: Math.min(bl.z, br.z) });
+}
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h); camera.aspect = w / h;
+  fitCamera();
+  overlay.width = w * DPR2; overlay.height = h * DPR2; overlay.style.width = w + "px"; overlay.style.height = h + "px";
+  U = Math.min(w, h);
+}
+const right2 = () => new THREE.Vector3(camR.x, 0, camR.z).normalize();
+
+// ---------- a pencil overlay for the burst lines and the "Squish" note ----------
+const overlay = document.getElementById("ink"), octx = overlay.getContext("2d");
+const DPR2 = Math.min(devicePixelRatio || 1, 2);
+let U = 400, boil = 0;
+const hn = (a, b, c) => { const h = Math.sin(a * 127.1 + b * 311.7 + c * 74.7) * 43758.5453; return (h - Math.floor(h)) * 2 - 1; };
+function pencil(pts, seed, w = 1.4, a = 0.75) {
+  for (let pass = 0; pass < 2; pass++) {
+    const J = pass ? 1.4 : 0.7;
+    const q = pts.map((p, i) => [p[0] + hn(i, seed + pass * 7.3, boil) * J, p[1] + hn(i + 0.5, seed + pass * 7.3, boil + 3) * J]);
+    octx.beginPath(); octx.moveTo(q[0][0], q[0][1]);
+    for (let i = 1; i < q.length - 1; i++) octx.quadraticCurveTo(q[i][0], q[i][1], (q[i][0] + q[i + 1][0]) / 2, (q[i][1] + q[i + 1][1]) / 2);
+    octx.lineTo(q[q.length - 1][0], q[q.length - 1][1]);
+    octx.lineWidth = pass ? w * 0.6 : w; octx.strokeStyle = `rgba(52,53,58,${pass ? a * 0.45 : a})`; octx.stroke();
+  }
+}
+function pline(x1, y1, x2, y2, seed, w, a) { const p = []; for (let i = 0; i <= 4; i++) p.push([x1 + (x2 - x1) * i / 4, y1 + (y2 - y1) * i / 4]); pencil(p, seed, w, a); }
+const scr = new THREE.Vector3();
+function toScreen(v) { scr.copy(v).project(camera); return [(scr.x + 1) / 2 * innerWidth, (1 - scr.y) / 2 * innerHeight]; }
+
+// ---------- sound ----------
+let AC = null, soundOn = true, noiseBuf = null;
+function audio() {
+  if (!soundOn) return null;
+  try {
+    if (!AC) {
+      AC = new (window.AudioContext || window.webkitAudioContext)();
+      noiseBuf = AC.createBuffer(1, AC.sampleRate, AC.sampleRate);
+      const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    }
+    if (AC.state === "suspended") AC.resume();
+  } catch (e) { AC = null; }
+  return AC;
+}
+function squeezeStart(o) {
+  const A = audio(); if (!A) return;
+  const src = A.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+  const f = A.createBiquadFilter(); f.type = "bandpass"; f.frequency.value = 200; f.Q.value = 5;
+  const g = A.createGain(); g.gain.value = 0;
+  src.connect(f).connect(g).connect(A.destination); src.start(); o.snd = { src, f, g };
+}
+function squeezeUpdate(o) {
+  if (!o.snd || !AC) return; const t = AC.currentTime;
+  o.snd.f.frequency.setTargetAtTime(180 + 300 * o.p + 50 * Math.sin(t * 23), t, 0.03);
+  o.snd.g.gain.setTargetAtTime(0.05 + 0.07 * Math.min(1, o.p), t, 0.05);
+}
+function squeezeStop(o) { if (!o.snd || !AC) return; const s = o.snd, t = AC.currentTime; o.snd = null; s.g.gain.setTargetAtTime(0, t, 0.04); s.src.stop(t + 0.3); }
+function pop() {
+  const A = audio(); if (!A) return; const t = A.currentTime, o = A.createOscillator(), g = A.createGain();
+  o.frequency.setValueAtTime(560, t); o.frequency.exponentialRampToValueAtTime(100, t + 0.22);
+  g.gain.setValueAtTime(0.3, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+  o.connect(g).connect(A.destination); o.start(t); o.stop(t + 0.3);
+}
+function rustle(delay = 0.25) { // paper unfolding
+  const A = audio(); if (!A) return; const t = A.currentTime + delay;
+  const src = A.createBufferSource(); src.buffer = noiseBuf;
+  const f = A.createBiquadFilter(); f.type = "highpass"; f.frequency.value = 2500;
+  const g = A.createGain(); g.gain.setValueAtTime(0, t);
+  for (let i = 0; i < 6; i++) { g.gain.linearRampToValueAtTime(rnd(0.03, 0.09), t + i * 0.06 + 0.01); g.gain.linearRampToValueAtTime(0.005, t + i * 0.06 + 0.05); }
+  src.connect(f).connect(g).connect(A.destination); src.start(t); src.stop(t + 0.45);
+}
+const buzz = ms => { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {} };
+
+// ---------- cells ----------
+// p (pressure) runs 0 → 1 while it squishes, 1 → 2 while it pinches and the nucleus divides; let go past ~1.75 and it splits
+// the wall's edge darkens where it turns away from you, like a pencil outline round a bubble
+const RIM_MAT = new THREE.ShaderMaterial({
+  transparent: true, depthWrite: false,
+  uniforms: { ink: { value: new THREE.Color(0x2f2d2a) } },
+  vertexShader: "varying vec3 vN; varying vec3 vV; void main(){ vec4 mv = modelViewMatrix * vec4(position, 1.0); vN = normalize(normalMatrix * normal); vV = normalize(-mv.xyz); gl_Position = projectionMatrix * mv; }",
+  fragmentShader: "uniform vec3 ink; varying vec3 vN; varying vec3 vV; void main(){ float f = 1.0 - abs(dot(normalize(vN), normalize(vV))); float a = smoothstep(0.5, 0.97, f) * 0.85 + smoothstep(0.0, 0.5, f) * 0.06; gl_FragColor = vec4(ink, a); }",
+});
+const SPH = new THREE.SphereGeometry(1, 72, 48), BASE = SPH.attributes.position.array.slice();
+const NUC = new THREE.IcosahedronGeometry(1, 3), NUCLEOLUS = new THREE.IcosahedronGeometry(1, 2);
+const blobTex = (() => { const cv = document.createElement("canvas"); cv.width = cv.height = 128; const g = cv.getContext("2d"); const gr = g.createRadialGradient(64, 64, 4, 64, 64, 62); gr.addColorStop(0, "rgba(40,38,34,0.38)"); gr.addColorStop(1, "rgba(40,38,34,0)"); g.fillStyle = gr; g.fillRect(0, 0, 128, 128); return new THREE.CanvasTexture(cv); })();
+const cells = [];
+let nextSeed = 1, splits = 0;
+const S_OF = p => smooth(Math.min(1, p)), Q_OF = p => smooth(p - 1);
+function smooth(t) { return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t); }
+
+function makeCell(x, z, R, tile, sx = 1, sy = 1) {
+  const o = { x, z, vx: 0, vz: 0, R, tile, p: 0, held: null, sx, sy, svx: 0, svy: 0, wait: 0, crossed: false, snd: null, seed: (nextSeed++) * 2.31, drift: rnd(0, 6), age: 0, roll: rnd(-1.1, 1.1) }; // roll: the screen direction it will divide along
+  o.group = new THREE.Group(); scene.add(o.group);
+  o.geo = new THREE.BufferGeometry();
+  o.geo.setAttribute("position", new THREE.BufferAttribute(BASE.slice(), 3));
+  o.geo.setAttribute("normal", new THREE.BufferAttribute(SPH.attributes.normal.array.slice(), 3));
+  o.geo.setIndex(SPH.index);
+  // the membrane: a clear, glossy wall with a dark rim drawn behind it like an outline
+  o.wall = new THREE.Mesh(o.geo, new THREE.MeshPhysicalMaterial({ color: 0xf4f7f1, transparent: true, opacity: 0.22, roughness: 0.12, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.05, depthWrite: false, envMap: ENV, envMapIntensity: 1.2 }));
+  o.wall.renderOrder = 2; o.wall.userData.cell = o;
+  o.rim = new THREE.Mesh(o.geo, RIM_MAT); o.rim.renderOrder = 3;
+  o.group.add(o.wall, o.rim);
+  // two nuclei that sit on top of each other until the cell divides; each is wrapped in a map fragment,
+  // the fragment the new creature will be folded from
+  o.nuc = [0, 1].map(() => {
+    const g = new THREE.Group();
+    const m = new THREE.Mesh(NUC, new THREE.MeshStandardMaterial({ map: MAPS[tile % MAPS.length], color: 0xf3efe6, roughness: 0.55, flatShading: true }));
+    m.castShadow = true;
+    const nl = new THREE.Mesh(NUCLEOLUS, new THREE.MeshStandardMaterial({ color: 0x3a3632, roughness: 0.4 }));
+    nl.scale.setScalar(0.3); nl.position.set(-0.32, 0.42, 0.62);
+    m.add(new THREE.LineSegments(new THREE.EdgesGeometry(NUC, 20), new THREE.LineBasicMaterial({ color: 0x2a2826, transparent: true, opacity: 0.18 })));
+    g.add(m, nl); o.group.add(g); return g;
+  });
+  // specks floating in the cytoplasm
+  const n = 40, gp = new Float32Array(n * 3); o.gBase = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { let v; do { v = [rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)]; } while (Math.hypot(...v) > 0.85 || Math.hypot(...v) < 0.5); o.gBase.set(v, i * 3); }
+  o.gGeo = new THREE.BufferGeometry(); o.gGeo.setAttribute("position", new THREE.BufferAttribute(gp, 3));
+  o.specks = new THREE.Points(o.gGeo, new THREE.PointsMaterial({ color: 0x4a463f, size: 0.07, transparent: true, opacity: 0.55, depthWrite: false }));
+  o.group.add(o.specks);
+  o.shadow = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: blobTex, transparent: true, depthWrite: false }));
+  o.shadow.rotation.x = -Math.PI / 2; o.shadow.position.y = 0.01; scene.add(o.shadow);
+  o.dirty = true;
+  cells.push(o); return o;
+}
+function disposeCell(o) {
+  squeezeStop(o);
+  scene.remove(o.group, o.shadow);
+  o.geo.dispose(); o.gGeo.dispose(); o.wall.material.dispose(); o.specks.material.dispose(); o.shadow.geometry.dispose(); o.shadow.material.dispose();
+  for (const g of o.nuc) g.traverse(m => { if (m.material) m.material.dispose(); if (m.isLineSegments) m.geometry.dispose(); });
+  const i = cells.indexOf(o); if (i >= 0) cells.splice(i, 1);
+}
+// the shape: squish flattens it toward you and widens it; pinch narrows a waist until it is two lobes
+function shapeOf(o) {
+  const s = S_OF(o.p), q = Q_OF(o.p);
+  return { s, q, xs: (1 + 0.28 * s + 0.62 * q) * o.sx, ys: (1 - 0.16 * s - 0.1 * q) * o.sy, zs: (1 - 0.22 * s - 0.08 * q) * o.sy, pinch: 0.1 * s + 0.5 * q, dent: 0.25 * s * (1 - q) };
+}
+function deform(sh, x, y, z, out, k) {
+  const w = 1 - sh.pinch * Math.exp(-(x * x) / 0.16);
+  out[k] = x * sh.xs; out[k + 1] = y * sh.ys * w; let Z = z * sh.zs * w;
+  if (z > 0) Z -= sh.dent * Math.exp(-(x * x + y * y) / 0.12) * z; // the finger's dent
+  out[k + 2] = Z;
+}
+const rollQ = new THREE.Quaternion(), Z_AXIS = new THREE.Vector3(0, 0, 1);
+function updateCellMesh(o, t) {
+  const sh = shapeOf(o), R = o.R;
+  const active = o.p > 0.001 || Math.abs(o.sx - 1) > 0.002 || Math.abs(o.sy - 1) > 0.002 || o.dirty;
+  if (active) {
+    const pos = o.geo.attributes.position.array;
+    for (let i = 0; i < pos.length; i += 3) deform(sh, BASE[i], BASE[i + 1], BASE[i + 2], pos, i);
+    o.geo.attributes.position.needsUpdate = true; o.geo.computeVertexNormals(); o.geo.computeBoundingSphere();
+    o.dirty = false;
+  }
+  // specks drift slowly
+  const gp = o.gGeo.attributes.position.array;
+  for (let i = 0; i < gp.length; i += 3) {
+    const a = t * 0.4 + i, b = o.gBase;
+    deform(sh, b[i] + Math.sin(a) * 0.05, b[i + 1] + Math.cos(a * 1.3) * 0.05, b[i + 2] + Math.sin(a * 0.7) * 0.05, gp, i);
+  }
+  o.gGeo.attributes.position.needsUpdate = true;
+  // nuclei: one in the middle, squashed by the squeeze; they part into the two lobes as it pinches
+  const nr = 0.42 * (1 - 0.18 * sh.q), lobe = 0.6 * sh.xs * sh.q;
+  o.nuc.forEach((g, i) => {
+    const side = i ? 1 : -1, bob = Math.sin(t * 1.1 + o.drift + i) * 0.03;
+    g.position.set(side * lobe, bob, 0.05);
+    g.scale.set(nr * (1 + 0.35 * sh.s * (1 - sh.q)), nr * (1 - 0.3 * sh.s * (1 - sh.q)), nr * (1 - 0.2 * sh.s));
+    g.rotation.set(t * 0.12 + i, t * 0.2 + o.drift, 0);
+    g.visible = i === 0 || sh.q > 0.01;
+  });
+  o.group.scale.setScalar(R);
+  // the wall breathes a little
+  const br = 1 + Math.sin(t * 1.6 + o.drift) * 0.012;
+  o.group.scale.multiplyScalar(br);
+  o.group.quaternion.copy(camera.quaternion).multiply(rollQ.setFromAxisAngle(Z_AXIS, o.roll));
+  o.group.position.set(o.x, R * sh.ys * 0.98, o.z);
+  o.shadow.position.set(o.x, 0.012, o.z); o.shadow.scale.set(R * 2.4 * sh.xs, R * 2.1, 1);
+}
+function reset() {
+  for (const o of [...cells]) disposeCell(o);
+  for (const m of [...meetings]) endMeeting(m);
+  for (const c of [...creatures]) removeCreature(c);
+  clearStains();
+  bursts.length = 0; fusions.length = 0; splits = 0;
+  makeCell(0, 0.4, 2.5, Math.floor(rnd(0, MAPS.length)), 0.3, 0.3);
+  hint("press and hold the cell");
+}
+
+// ---------- dividing ----------
+const bursts = [];
+function divide(o) {
+  if (!cells.includes(o)) return;
+  const sh = shapeOf(o), R = o.R, off = 0.6 * sh.xs * R;
+  const ri = camR.clone().multiplyScalar(Math.cos(o.roll)).addScaledVector(camU, Math.sin(o.roll)).setY(0).normalize(); // the axis it pinched along, on the paper
+  const R2 = Math.max(1.05, R * 0.8), full = cells.length >= 16;
+  const [sx, sy] = toScreen(new THREE.Vector3(o.x, R, o.z));
+  const [ex] = toScreen(new THREE.Vector3(o.x, R, o.z).addScaledVector(camR, R));
+  bursts.push({ x: sx, y: sy, r: Math.abs(ex - sx), t: 0, seed: nextSeed++ * 5.1 });
+  for (const side of full ? [0] : [-1, 1]) {
+    // a daughter keeps the map; now and then it drifts to a neighbouring fragment
+    const tile = Math.random() < 0.7 ? o.tile : (o.tile + (Math.random() < 0.5 ? 1 : MAPS.length - 1)) % MAPS.length;
+    const c = makeCell(o.x + ri.x * off * side, o.z + ri.z * off * side, R2, tile, 1.3, 0.75);
+    c.vx = ri.x * side * 7; c.vz = ri.z * side * 7; c.svx = -2; c.svy = 2;
+  }
+  disposeCell(o);
+  hatch(o.x, o.z, o.tile, R);
+  pop(); rustle(); buzz([15, 30, 40]);
+  splits++;
+  if (splits === 1) hint("every cell divides · tap a creature");
+  else if (splits === 3) hint("");
+}
+
+// ---------- the brood: a paper creature unfolds out of the division ----------
+const CAP = 14;
+const SMALL = ["hopper", "crawler"], LARGE = ["walker", "floater", "roller"];
+const formGene = f => (FORMS.indexOf(f) + rnd(0.15, 0.85)) / FORMS.length;
+function hatch(x, z, tile, R) {
+  // a division only frees something small: a paper frog or a caterpillar
+  const g = randomGenome(), T = MAPS.length;
+  g[G.print] = (tile + 0.5) / T;
+  if (Math.random() < 0.5) g[G.tone] = (tile + 0.5) / T;
+  g[G.form] = formGene(pick(SMALL)); g[G.bulk] = rnd(0, 0.45); g[G.legs] = rnd(0, 0.6);
+  const c = spawnCreature(g, x, z, 0.75);
+  const to = new THREE.Vector3(-camF.x, 0, -camF.z).normalize().applyAxisAngle(new THREE.Vector3(0, 1, 0), rnd(-0.9, 0.9));
+  const d = rnd(2.8, 4.2) + R * 0.6;
+  c.launch = { t: 0, dur: 0.9, fx: x, fz: z, tx: x + to.x * d, tz: z + to.z * d, h: R * 1.6 + 1.5 };
+  c.yaw = Math.atan2(to.x, to.z); c.wand = c.yaw;
+  const small = creatures.filter(k => !k.large && k.leaving == null && !k.dying);
+  if (small.length > CAP) { const old = small.find(k => !k.launch && !k.meeting); if (old) startDeath(old); }
+}
+// ---------- clumping: four cells that cling together fuse into one large creature ----------
+const FUSE_N = 4, FUSE_HOLD = 1.8, FUSE_T = 1.6, BIG_CAP = 5;
+const fusions = [];
+function clumps() { // groups of cells touching one another
+  const free = cells.filter(o => o.held == null && !o.fusing && o.age > 1.2), seen = new Set(), out = [];
+  for (const o of free) {
+    if (seen.has(o)) continue;
+    const comp = [o], st = [o]; seen.add(o);
+    while (st.length) {
+      const a = st.pop();
+      for (const b of free) if (!seen.has(b) && Math.hypot(a.x - b.x, a.z - b.z) < (a.R + b.R) * 1.3) { seen.add(b); comp.push(b); st.push(b); }
+    }
+    out.push(comp);
+  }
+  return out;
+}
+function updateClumps(dt) {
+  const inBig = new Set();
+  for (const comp of clumps()) {
+    if (comp.length < FUSE_N) continue;
+    for (const o of comp) { inBig.add(o); o.clumpT = (o.clumpT || 0) + dt; }
+    if (Math.min(...comp.map(o => o.clumpT)) > FUSE_HOLD) {
+      const cx = comp.reduce((a, o) => a + o.x, 0) / comp.length, cz = comp.reduce((a, o) => a + o.z, 0) / comp.length;
+      const four = comp.sort((a, b) => Math.hypot(a.x - cx, a.z - cz) - Math.hypot(b.x - cx, b.z - cz)).slice(0, FUSE_N);
+      startFusion(four);
+    }
+  }
+  for (const o of cells) if (!inBig.has(o)) o.clumpT = 0;
+}
+function startFusion(group) {
+  const cx = group.reduce((a, o) => a + o.x, 0) / group.length, cz = group.reduce((a, o) => a + o.z, 0) / group.length;
+  const f = { cells: group, x: cx, z: cz, t: 0, R: group.reduce((a, o) => a + o.R, 0) / group.length, creature: null };
+  for (const o of group) { o.fusing = f; o.fx0 = o.x; o.fz0 = o.z; o.R0 = o.R; }
+  // the large creature is folded from the maps the four nuclei carried
+  const tiles = group.map(o => o.tile), count = {};
+  for (const t of tiles) count[t] = (count[t] || 0) + 1;
+  const main = +Object.keys(count).sort((a, b) => count[b] - count[a])[0], other = tiles.find(t => t !== main) ?? main, T = MAPS.length;
+  const g = randomGenome();
+  g[G.form] = formGene(pick(LARGE)); g[G.print] = (main + 0.5) / T; g[G.tone] = (other + 0.5) / T;
+  g[G.bulk] = rnd(0.55, 1); g[G.stride] = rnd(0.4, 1); g[G.wings] = rnd(0.3, 1);
+  f.genome = g;
+  fusions.push(f);
+  squelch();
+  if (!bigSeen) { bigSeen = true; hint("clumped cells fuse into a big one"); }
+}
+let bigSeen = false;
+function updateFusions(dt) {
+  for (let i = fusions.length - 1; i >= 0; i--) {
+    const f = fusions[i]; f.t += dt;
+    const t = Math.min(1, f.t / FUSE_T), e = smooth(t);
+    // the cells crowd into the middle, flatten against each other and shrink as the paper unfolds out of them
+    for (const o of f.cells) {
+      o.x = o.fx0 + (f.x - o.fx0) * e * 0.85; o.z = o.fz0 + (f.z - o.fz0) * e * 0.85;
+      o.R = o.R0 * (1 - 0.75 * e); o.vx = o.vz = 0;
+      o.sx = 1 + 0.25 * Math.sin(t * 9) * (1 - t); o.sy = 1 - 0.2 * Math.sin(t * 9 + 1) * (1 - t);
+    }
+    if (!f.creature && t > 0.35) {
+      f.creature = spawnCreature(f.genome, f.x, f.z, 1.55); f.creature.large = true; f.creature.life *= 1.4; f.creature.k = 0.05; f.creature.forming = true;
+      rustle(0);
+    }
+    if (f.creature) f.creature.k = Math.max(0.05, smooth((t - 0.35) / 0.65));
+    if (t >= 1) {
+      const [sx, sy] = toScreen(new THREE.Vector3(f.x, f.R, f.z));
+      const [ex] = toScreen(new THREE.Vector3(f.x, f.R, f.z).addScaledVector(camR, f.R * 1.6));
+      bursts.push({ x: sx, y: sy, r: Math.abs(ex - sx), t: 0, seed: nextSeed++ * 5.1 });
+      for (const o of f.cells) disposeCell(o);
+      if (f.creature) { f.creature.forming = false; f.creature.k = 1; f.creature.pop = 1; }
+      pop(); buzz([20, 40, 60]);
+      fusions.splice(i, 1);
+      const big = creatures.filter(k => k.large && k.leaving == null && !k.dying);
+      if (big.length > BIG_CAP) startDeath(big[0]);
+    }
+  }
+}
+function squelch() { // a low wet churn while they fuse
+  const A = audio(); if (!A) return; const t = A.currentTime;
+  const src = A.createBufferSource(); src.buffer = noiseBuf;
+  const fl = A.createBiquadFilter(); fl.type = "lowpass"; fl.frequency.setValueAtTime(300, t); fl.frequency.linearRampToValueAtTime(900, t + FUSE_T);
+  const g = A.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.14, t + 0.3); g.gain.linearRampToValueAtTime(0, t + FUSE_T);
+  src.connect(fl).connect(g).connect(A.destination); src.start(t); src.stop(t + FUSE_T + 0.1);
+}
+
+function spawnCreature(genome, x, z, grow = 1) {
+  const c = {
+    id: nextId++, genome, age: 0, walkT: rnd(0, 10), k: 0.05, x, z, yaw: rnd(0, 6.28), turnV: 0, bank: 0, lunge: 0, shake: 0,
+    dying: null, elderT: 0, grow, pop: 0, alt: null, leaving: null, launch: null, wand: rnd(0, 6.28),
+    hop: { air: false, t: 0, rest: rnd(0.2, 0.8), dur: 0.5, dist: 0 }, rollA: 0, trail: [], trailD: 0,
+    uvOff: [Math.random(), Math.random()],
+    energy: rnd(60, 100), met: new Map(), meeting: null, cocoon: false, grace: 2, gen: 0,
+  };
+  c.moveDir = c.yaw;
+  buildBody(c);
+  c.life = lerp(45, 110, genome[G.life]) * rnd(0.9, 1.1);
+  creatures.push(c);
+  return c;
+}
+function removeCreature(c) {
+  if (c.meeting) cancelMeeting(c.meeting);
+  destroyBody(c);
+  creatures = creatures.filter(x => x !== c);
+}
+// ---------- the paper brood's genetics (from Paper Brood) ----------
+// When two come within reach they either trade scraps of paper (each takes on the other's map and pulls a
+// trait toward it), or the hungrier one reels the other in and unfolds it scrap by scrap, or the pair press
+// together into a crumpled cocoon that bursts into both parents (changed) and a child bred from them.
+const THREAD_RANGE = 3.4, SNAP = 6.5, MAX_POP = 22;
+function exchange(c, other) {
+  const g = [...c.genome];
+  let i = 0, best = -1;
+  g.forEach((v, k) => { const d = Math.abs(other.genome[k] - v); if (d > best) { best = d; i = k; } });
+  g[i] += (other.genome[i] - g[i]) * 0.55;
+  if (Math.random() < 0.35 + MUT * 2) { const k = Math.floor(Math.random() * g.length); g[k] += gauss() * 0.18; }
+  for (let k = 0; k < g.length; k++) g[k] = clamp01(g[k]);
+  return { genome: g };
+}
+const touchDist = (a, b) => 0.75 * (a.p.bulk * a.grow + b.p.bulk * b.grow) + 0.3;
+const free = c => !c.meeting && !c.dying && !c.cocoon && !c.forming && !c.launch && c.leaving == null && c.k >= 1 && c.grace <= 0;
+const anchor = c => new THREE.Vector3(c.body.position.x, c.body.position.y + c.topY * 0.5 * c.body.scale.y, c.body.position.z);
+function threadPoint(A, B, f) {
+  const p = A.clone().lerp(B, f), sag = Math.max(0, SNAP - A.distanceTo(B)) * 0.12;
+  p.y = Math.max(0.03, p.y - Math.sin(Math.PI * f) * sag);
+  return p;
+}
+function checkMeeting(a, b) {
+  if (!free(a) || !free(b)) return;
+  if ((a.met.get(b.id) || 0) > simT) return;
+  if (Math.hypot(a.x - b.x, a.z - b.z) > THREAD_RANGE * Math.max(a.grow, b.grow)) return;
+  const elder = c => c.elderT > 0 ? 0.7 : 1;
+  const threat = c => c.p.aggr * (0.6 + 0.4 * c.p.bulk * c.grow) * (1.2 - c.energy / 120) * elder(c);
+  const ta = threat(a), tb = threat(b), hot = Math.max(ta, tb);
+  const m = { a, b, t: 0, kind: "trade", pieces: [], next: 0.5, sent: 0 };
+  if (hot > 0.35 && Math.random() < hot) {
+    m.kind = "kill"; m.killer = ta >= tb ? a : b; m.victim = m.killer === a ? b : a;
+  } else if (creatures.filter(c => !c.dying).length < MAX_POP && a.energy > 30 && b.energy > 30 && a.large === b.large && Math.random() < 0.55) {
+    m.kind = "breed";
+  } else {
+    m.ga = [...a.genome]; m.gb = [...b.genome]; m.goal = 3 + Math.floor(rnd(0, 3));
+  }
+  a.meeting = b.meeting = m;
+  meetings.push(m);
+}
+// a folded scrap of the giver's paper that flies across
+function sendPiece(m, from, to) {
+  const s = (0.16 + 0.1 * from.p.bulk) * from.grow;
+  UV_SCALE = 0.3 / s;
+  const geo = paperGeo([[[-s, 0, 0], [s, 0, 0], [0, s * 1.4, 0]], [[s, 0, 0], [0, s * 1.4, 0], [0, s * 0.5, s * 0.6]]], [Math.random(), Math.random()]);
+  UV_SCALE = 0.45;
+  const mat = new THREE.MeshStandardMaterial({ map: from.mat.map, color: 0xf5f4f0, flatShading: true, side: THREE.DoubleSide, roughness: 0.9 });
+  const mesh = new THREE.Mesh(geo, mat); mesh.castShadow = true;
+  scene.add(mesh);
+  m.pieces.push({ mesh, from, to, t: 0, spin: rnd(4, 8) });
+}
+function arrive(m, pc) {
+  if (m.kind !== "trade") return;
+  // the receiver's second paper becomes the giver's map, and it pulls one trait toward the giver
+  const g = pc.to === m.a ? m.ga : m.gb, src = pc.from.genome;
+  g[G.tone] = src[G.print];
+  pc.to.mat2.map = pc.from.mat.map; pc.to.mat2.needsUpdate = true;
+  let i = 0, best = -1;
+  g.forEach((v, k) => { if (k === G.tone) return; const d = Math.abs(src[k] - v); if (d > best) { best = d; i = k; } });
+  g[i] += (src[i] - g[i]) * 0.35;
+  if (Math.random() < MUT * 2) { const k = Math.floor(Math.random() * g.length); g[k] = clamp01(g[k] + gauss() * 0.15); }
+}
+function updateMeeting(m, dt) {
+  m.t += dt;
+  const { a, b } = m;
+  if (m.kind === "trade") {
+    if (m.t > 14) return endMeeting(m);
+    m.next -= dt;
+    if (m.next <= 0 && m.sent < m.goal) { m.next = 1.2; const from = m.sent % 2 ? b : a; sendPiece(m, from, from === a ? b : a); m.sent++; }
+    if (m.sent >= m.goal && m.pieces.length === 0) return endMeeting(m);
+  } else if (m.kind === "kill") {
+    const { killer, victim } = m;
+    if (m.feeding == null) { // the victim is reeled in
+      const dx = killer.x - victim.x, dz = killer.z - victim.z, dd = Math.hypot(dx, dz) || 1;
+      victim.x += dx / dd * 1.5 * dt; victim.z += dz / dd * 1.5 * dt;
+      if (dd < touchDist(a, b)) { m.feeding = 0; victim.cocoon = true; }
+      if (m.t > 10) return endMeeting(m);
+    } else { // and unfolded scrap by scrap
+      m.feeding += dt;
+      victim.k = Math.max(0.02, 1 - m.feeding / 1.8); victim.shake = 0.1;
+      m.next -= dt; if (m.next <= 0) { m.next = 0.2; sendPiece(m, victim, killer); }
+      if (m.feeding >= 1.8) {
+        const res = exchange(killer, victim);
+        killer.energy = Math.min(120, killer.energy + 60);
+        victim.meeting = null; victim.cocoon = false; victim.shake = 0;
+        leaveSheet(victim); removeCreature(victim);
+        endMeeting(m);
+        apply(killer, res);
+        return;
+      }
+    }
+  } else { // breed
+    if (!m.cocoon) {
+      const dx = b.x - a.x, dz = b.z - a.z, dd = Math.hypot(dx, dz) || 1;
+      a.x += dx / dd * 0.9 * dt; a.z += dz / dd * 0.9 * dt; b.x -= dx / dd * 0.9 * dt; b.z -= dz / dd * 0.9 * dt;
+      if (dd < touchDist(a, b)) startCocoon(m);
+      else if (m.t > 12) return endMeeting(m);
+    } else updateCocoon(m, dt);
+  }
+  for (let i = m.pieces.length - 1; i >= 0; i--) {
+    const pc = m.pieces[i]; pc.t += dt / 0.9;
+    const q = threadPoint(anchor(pc.from), anchor(pc.to), Math.min(1, pc.t));
+    pc.mesh.position.copy(q); pc.mesh.position.y += 0.08;
+    pc.mesh.rotation.set(pc.t * pc.spin, pc.t * pc.spin * 0.7, 0);
+    if (pc.t >= 1) { arrive(m, pc); disposePiece(pc); m.pieces.splice(i, 1); }
+  }
+}
+function disposePiece(pc) { scene.remove(pc.mesh); pc.mesh.geometry.dispose(); pc.mesh.material.dispose(); }
+function crumpledBall(r, map, seed) {
+  const g = new THREE.IcosahedronGeometry(r, 1), a = g.attributes.position, off = new Map();
+  for (let i = 0; i < a.count; i++) {
+    const key = `${a.getX(i).toFixed(3)},${a.getY(i).toFixed(3)},${a.getZ(i).toFixed(3)}`;
+    if (!off.has(key)) off.set(key, 1 + (Math.random() - 0.5) * 0.45);
+    const k = off.get(key); a.setXYZ(i, a.getX(i) * k, a.getY(i) * k, a.getZ(i) * k);
+  }
+  const tris = [];
+  for (let i = 0; i < a.count; i += 3) tris.push([0, 1, 2].map(k => [a.getX(i + k), a.getY(i + k), a.getZ(i + k)]));
+  g.dispose(); UV_SCALE = 0.4 / r; const wad = paperGeo(tris, [seed, seed * 1.7]); UV_SCALE = 0.45;
+  const mat = new THREE.MeshStandardMaterial({ map, color: 0xf5f4f0, flatShading: true, side: THREE.DoubleSide, roughness: 0.9 });
+  const mesh = new THREE.Mesh(wad, mat); mesh.castShadow = true; mesh.receiveShadow = true;
+  mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(wad, 6), new THREE.LineBasicMaterial({ color: 0x2a2826, transparent: true, opacity: 0.35 })));
+  return mesh;
+}
+function startCocoon(m) {
+  const { a, b } = m;
+  m.cocoon = { t: 0, x: (a.x + b.x) / 2, z: (a.z + b.z) / 2, r: (0.4 * (a.p.bulk + b.p.bulk) / 2 + 0.25) * (a.grow + b.grow) / 2 };
+  a.cocoon = b.cocoon = true;
+  const grp = new THREE.Group(), r = m.cocoon.r;
+  const wa = crumpledBall(r, a.mat.map, Math.random()), wb = crumpledBall(r * 0.9, b.mat.map, Math.random());
+  wa.position.x = -0.22 * r; wb.position.set(0.25 * r, 0.1 * r, 0.1 * r);
+  grp.add(wa, wb); grp.position.set(m.cocoon.x, r, m.cocoon.z); grp.scale.setScalar(0.05);
+  scene.add(grp); m.cocoonGroup = grp;
+}
+function updateCocoon(m, dt) {
+  const C = m.cocoon, { a, b } = m; C.t += dt;
+  for (const c of [a, b]) { c.k = Math.max(0.02, 1 - C.t / 0.5); c.x = lerp(c.x, C.x, Math.min(1, dt * 4)); c.z = lerp(c.z, C.z, Math.min(1, dt * 4)); }
+  const grow = Math.min(1, C.t / 0.5), pulse = 1 + Math.sin(C.t * 7) * 0.06 * grow;
+  m.cocoonGroup.scale.setScalar(Math.max(0.05, grow) * pulse);
+  m.cocoonGroup.rotation.y += dt * 0.9; m.cocoonGroup.rotation.z = Math.sin(C.t * 3) * 0.15;
+  if (C.t >= 3) burst(m);
+}
+function burst(m) {
+  const C = m.cocoon, { a, b } = m, th = rnd(0, 6.28), d = 1.1 * (a.grow + b.grow) / 2;
+  a.x = C.x + Math.cos(th) * d; a.z = C.z + Math.sin(th) * d;
+  b.x = C.x - Math.cos(th) * d; b.z = C.z - Math.sin(th) * d;
+  a.yaw = Math.atan2(a.x - C.x, a.z - C.z); b.yaw = a.yaw + Math.PI;
+  const na = exchange(a, b), nb = exchange(b, a);
+  // the child is bred from both genomes with mutation; small parents have small children, large ones large
+  const g = breed(a.genome, b.genome, MUT), big = !!(a.large && b.large), form = FORMS[Math.min(4, Math.floor(g[G.form] * 5))];
+  if (!big && !SMALL.includes(form)) g[G.form] = formGene(pick(SMALL));
+  if (big && SMALL.includes(form)) g[G.form] = formGene(pick(LARGE));
+  const ch = spawnCreature(g, C.x, C.z, big ? 1.55 : 0.75);
+  ch.large = big; ch.gen = Math.max(a.gen, b.gen) + 1; if (big) ch.life *= 1.4;
+  ch.uvOff = pick([a, b]).uvOff;
+  const ang = th + Math.PI / 2, dd = rnd(1.5, 2.5) * (big ? 1.5 : 1);
+  ch.launch = { t: 0, dur: 0.6, fx: C.x, fz: C.z, tx: C.x + Math.cos(ang) * dd, tz: C.z + Math.sin(ang) * dd, h: 1.6 };
+  rustle(0);
+  a.energy -= 15; b.energy -= 15;
+  a.cocoon = b.cocoon = false;
+  endMeeting(m);
+  apply(a, na); apply(b, nb);
+}
+function apply(c, res) {
+  if (c.dying || !creatures.includes(c)) return;
+  c.genome = res.genome;
+  destroyBody(c); buildBody(c); c.pop = 1;
+}
+function endMeeting(m) {
+  if (m.ended) return; m.ended = true;
+  const { a, b } = m;
+  for (const pc of m.pieces) disposePiece(pc);
+  m.pieces = [];
+  if (m.cocoonGroup) { scene.remove(m.cocoonGroup); m.cocoonGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }); m.cocoonGroup = null; }
+  for (const c of [a, b]) { c.meeting = null; c.cocoon = false; c.shake = 0; c.grace = 2; if (c.k < 1 && !c.dying) c.k = Math.max(c.k, 0.02); }
+  a.met.set(b.id, simT + 10); b.met.set(a.id, simT + 10);
+  const i = meetings.indexOf(m); if (i >= 0) meetings.splice(i, 1);
+  if (m.kind === "trade") { apply(a, { genome: m.ga }); apply(b, { genome: m.gb }); }
+}
+function cancelMeeting(m) { endMeeting(m); }
+function startDeath(c) {
+  if (c.dying) return;
+  if (c.meeting) cancelMeeting(c.meeting);
+  c.dying = { t: 0, tilt: rnd(-0.7, 0.7) };
+}
+
+// ---------- what the dead leave behind ----------
+// the unfolded sheet lies on the paper for a while; under it, grid squares are pasted over for good with its map
+const STAIN_N = 40, SQ = 2.5, STAIN_PX = 2048, PXC = STAIN_PX / STAIN_N, STAIN_HALF = STAIN_N * SQ / 2;
+const stainCv = document.createElement("canvas"); stainCv.width = stainCv.height = STAIN_PX;
+const stainTex = new THREE.CanvasTexture(stainCv); stainTex.encoding = THREE.sRGBEncoding; stainTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+const stainLayer = new THREE.Mesh(new THREE.PlaneGeometry(STAIN_N * SQ, STAIN_N * SQ), new THREE.MeshStandardMaterial({ map: stainTex, transparent: true, depthWrite: false, roughness: 1 }));
+stainLayer.rotation.x = -Math.PI / 2; stainLayer.position.y = 0.005; stainLayer.receiveShadow = true; scene.add(stainLayer);
+const stains = [], filled = new Set();
+function leaveSheet(c) {
+  const sz = (1.5 * c.p.bulk + 0.7) * c.grow;
+  const mat = new THREE.MeshStandardMaterial({ color: c.color, map: c.mat.map, side: THREE.DoubleSide, roughness: 0.9, transparent: true });
+  const sheet = new THREE.Mesh(new THREE.PlaneGeometry(sz, sz), mat);
+  sheet.rotation.set(-Math.PI / 2, 0, rnd(0, 6.28)); sheet.position.set(c.x, 0.02, c.z); sheet.receiveShadow = true;
+  const hh = sz / 2, pts = [-hh, -hh, hh, hh, -hh, hh, hh, -hh, 0, -hh, 0, hh, -hh, 0, hh, 0];
+  for (let i = 0; i < 4; i++) { const a = rnd(0, 6.28), o = rnd(-hh * 0.6, hh * 0.6); pts.push(-hh, o + Math.sin(a) * hh * 0.4, hh, o - Math.sin(a) * hh * 0.4); }
+  const lp = []; for (let i = 0; i < pts.length; i += 2) lp.push(pts[i], pts[i + 1], 0.003);
+  const lg = new THREE.BufferGeometry(); lg.setAttribute("position", new THREE.Float32BufferAttribute(lp, 3));
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x2a2826, transparent: true, opacity: 0.35 });
+  sheet.add(new THREE.LineSegments(lg, lineMat));
+  scene.add(sheet);
+  scraps.push({ sheet, mat, lineMat, t: 0 });
+  stainCells(c);
+}
+function stainCells(c) {
+  const ci = Math.floor((c.x + STAIN_HALF) / SQ), cj = Math.floor((c.z + STAIN_HALF) / SQ);
+  if (ci < 0 || cj < 0 || ci >= STAIN_N || cj >= STAIN_N) return;
+  const want = Math.max(1, Math.min(7, Math.round(c.p.bulk * c.grow * 2.2 + rnd(0, 1.2))));
+  const sq = [[ci, cj]], seen = new Set([ci + "," + cj]);
+  for (let guard = 0; sq.length < want && guard < 400; guard++) {
+    const [i, j] = pick(sq), [di, dj] = pick([[1, 0], [-1, 0], [0, 1], [0, -1]]), n = [i + di, j + dj], key = n.join(",");
+    if (seen.has(key) || n[0] < 0 || n[1] < 0 || n[0] >= STAIN_N || n[1] >= STAIN_N) continue;
+    seen.add(key); sq.push(n);
+  }
+  stains.push({ sq, maps: [c.mat.map.image, c.mat2.map.image], i: 0, t: 0.3 });
+}
+function fillCell(i, j, img) {
+  const x0 = Math.round(i * PXC), x1 = Math.round((i + 1) * PXC), y0 = Math.round(j * PXC), y1 = Math.round((j + 1) * PXC), w = x1 - x0, hh = y1 - y0;
+  const cv = document.createElement("canvas"); cv.width = w; cv.height = hh;
+  const g = cv.getContext("2d");
+  const cs = rnd(90, 200), sx = rnd(0, img.width - cs), sy = rnd(0, img.height - cs);
+  g.drawImage(img, sx, sy, cs, cs, 0, 0, w, hh);
+  // the grid's pencil lines stay visible over the pasted square
+  g.fillStyle = "rgba(70,74,82,0.35)"; g.fillRect(0, 0, 2, hh); g.fillRect(0, 0, w, 2);
+  stainCv.getContext("2d").drawImage(cv, x0, y0);
+  filled.add(i + "," + j);
+  const t = new THREE.CanvasTexture(cv);
+  renderer.copyTextureToTexture(new THREE.Vector2(x0, STAIN_PX - y0 - hh), t, stainTex); // patch just this square on the GPU
+  t.dispose();
+}
+function updateStains(dt) {
+  for (let k = stains.length - 1; k >= 0; k--) {
+    const s = stains[k]; s.t -= dt;
+    while (s.t <= 0 && s.i < s.sq.length) { const [i, j] = s.sq[s.i]; fillCell(i, j, s.maps[s.i % 3 === 2 ? 1 : 0]); s.i++; s.t += 0.12; }
+    if (s.i >= s.sq.length) stains.splice(k, 1);
+  }
+  for (let i = scraps.length - 1; i >= 0; i--) {
+    const s = scraps[i]; s.t += dt;
+    const o = Math.max(0, Math.min(1, (7 - s.t) / 3));
+    s.mat.opacity = o; s.lineMat.opacity = 0.35 * o;
+    if (s.t > 7) { scene.remove(s.sheet); s.sheet.traverse(x => x.geometry && x.geometry.dispose()); s.mat.dispose(); s.lineMat.dispose(); scraps.splice(i, 1); }
+  }
+}
+function clearStains() {
+  stains.length = 0; filled.clear();
+  stainCv.getContext("2d").clearRect(0, 0, STAIN_PX, STAIN_PX); stainTex.needsUpdate = true;
+  for (const s of scraps) { scene.remove(s.sheet); s.sheet.traverse(x => x.geometry && x.geometry.dispose()); s.mat.dispose(); s.lineMat.dispose(); }
+  scraps.length = 0;
+}
+
+function stepCreature(c, dt) {
+  const p = c.p;
+  let paused = false, yOff = 0;
+  // death: it crumples, then leaves its unfolded sheet and a patch of its map pasted into the grid
+  if (c.dying) {
+    c.dying.t += dt;
+    if (c.dying.t > 1.3) { leaveSheet(c); removeCreature(c); return; }
+    pose(c, true, dt); return;
+  }
+  c.grace -= dt;
+  if (!c.cocoon && !c.forming && !c.launch && c.leaving == null) { c.age += dt; c.energy = Math.max(0, c.energy - dt * 0.6); }
+  // old age: the paper yellows and the creases darken
+  const life = c.age / c.life;
+  c.elderT = life > 0.8 ? Math.min(1, (life - 0.8) / 0.2) : 0;
+  c.mat.color.setRGB(lerp(0.96, 0.74, c.elderT), lerp(0.95, 0.69, c.elderT), lerp(0.93, 0.6, c.elderT)); c.mat2.color.copy(c.mat.color);
+  c.lineMat.opacity = 0.4 + 0.35 * c.elderT;
+  if (c.age > c.life) { startDeath(c); pose(c, true, dt); return; }
+  if (c.forming || c.cocoon) paused = true;
+  else if (c.leaving != null) { // folds itself away
+    c.leaving -= dt / 0.9; c.k = Math.max(0.02, c.leaving);
+    if (c.leaving <= 0) { removeCreature(c); return; }
+    paused = true;
+  } else if (c.launch) { // thrown out of the division, unfolding in the air
+    const L = c.launch; L.t += dt / L.dur; const t = Math.min(1, L.t);
+    c.x = L.fx + (L.tx - L.fx) * t; c.z = L.fz + (L.tz - L.fz) * t;
+    yOff = 4 * L.h * t * (1 - t); c.k = Math.max(0.05, smooth(t)); paused = true;
+    if (L.t >= 1) { c.launch = null; c.k = 1; c.pop = 1; }
+  } else {
+    c.k = Math.min(1, c.k + dt * 2);
+    c.walkT += dt;
+    // wander, keep off the cells, stay on the part of the paper you can see
+    c.wand += (Math.random() - 0.5) * dt * 3;
+    let dx = Math.sin(c.wand), dz = Math.cos(c.wand);
+    for (const o of cells) {
+      const ox = c.x - o.x, oz = c.z - o.z, d = Math.hypot(ox, oz) || 1e-3, near = o.R * 1.25 + 1;
+      if (d < near) { const w = (near - d) * 1.5 / d; dx += ox * w; dz += oz * w; }
+    }
+    const m = 1.2, b = BOUNDS;
+    if (c.x < b.x0 + m) dx += (b.x0 + m - c.x); if (c.x > b.x1 - m) dx -= (c.x - b.x1 + m);
+    if (c.z < b.z0 + m) dz += (b.z0 + m - c.z); if (c.z > b.z1 - m) dz -= (c.z - b.z1 + m);
+    const want = Math.atan2(dx, dz), yaw0 = c.yaw;
+    if (TURN[p.form]) c.yaw += angleTo(want, c.yaw) * Math.min(1, dt * TURN[p.form]);
+    const v = p.speed * PACE[p.form] * 0.75 * (0.85 + 0.15 * Math.sin(c.walkT * p.gait * 0.5));
+    const px = c.x, pz = c.z;
+    if (p.form === "hopper") {
+      const h = c.hop; h.t += dt;
+      if (h.air) {
+        c.x += Math.sin(c.yaw) * h.dist / h.dur * dt; c.z += Math.cos(c.yaw) * h.dist / h.dur * dt;
+        if (h.t >= h.dur) { h.air = false; h.t = 0; h.rest = rnd(0.3, 1) * 1.6 / p.speed; }
+      } else {
+        c.yaw += angleTo(want, c.yaw) * Math.min(1, dt * 4);
+        if (h.t >= h.rest) { h.air = true; h.t = 0; h.dur = lerp(0.4, 0.65, p.stride); h.dist = lerp(1.2, 2.6, p.stride) * p.bulk * 0.8; }
+      }
+    } else if (p.form === "crawler") {
+      c.moveDir = c.yaw + Math.sin(c.walkT * p.gait * 0.7) * lerp(0.25, 0.7, p.stride);
+      c.x += Math.sin(c.moveDir) * v * dt; c.z += Math.cos(c.moveDir) * v * dt;
+    } else { c.x += Math.sin(c.yaw) * v * dt; c.z += Math.cos(c.yaw) * v * dt; }
+    if (p.form === "roller") c.rollA += Math.hypot(c.x - px, c.z - pz) / c.rollR;
+    c.turnV = (c.yaw - yaw0) / Math.max(dt, 1e-3);
+  }
+  // the cells shoulder the brood out of their way
+  for (const o of cells) {
+    const ox = c.x - o.x, oz = c.z - o.z, d = Math.hypot(ox, oz) || 1e-3, r = o.R * 1.05 + 0.35;
+    if (d < r && !c.launch && !c.forming && !o.fusing) { c.x = o.x + ox / d * r; c.z = o.z + oz / d * r; }
+  }
+  if (p.form === "crawler" && (c.trail.length === 0 || Math.hypot(c.x - c.trail[0].x, c.z - c.trail[0].z) > 0.03)) {
+    c.trail.unshift({ x: c.x, z: c.z }); if (c.trail.length > 260) c.trail.pop();
+  }
+  pose(c, paused, dt);
+  if (yOff) { // carry the whole pose up into the air, legs and all
+    c.body.position.y += yOff;
+    for (const L of c.legs) for (const m of [L.thigh, L.shin]) m.matrix.elements[13] += yOff;
+    if (c.segs) for (const s of c.segs) s.position.y += yOff;
+  }
+}
+
+// ---------- touch ----------
+const pointers = new Map();
+const pick3 = (cx, cy, objs) => { ndc.set(cx / innerWidth * 2 - 1, -(cy / innerHeight) * 2 + 1); ray.setFromCamera(ndc, camera); return ray.intersectObjects(objs, true)[0]; };
+const cv = renderer.domElement;
+cv.tabIndex = 0; cv.setAttribute("role", "img");
+cv.setAttribute("aria-label", "A glassy cell sits on graph paper. Press and hold it to squeeze it until it divides and a folded paper creature unfolds out of it. Space bar presses the middle cell.");
+cv.addEventListener("pointerdown", ev => {
+  ev.preventDefault(); audio();
+  try { cv.setPointerCapture(ev.pointerId); } catch (e) {}
+  const rec = { x: ev.clientX, y: ev.clientY, cell: null };
+  const hit = pick3(ev.clientX, ev.clientY, [...cells.filter(o => o.held == null && !o.fusing).map(o => o.wall), ...creatures.map(c => c.body)]);
+  if (hit) {
+    let o = hit.object; while (o && !o.userData.cell && !o.userData.creature) o = o.parent;
+    if (o && o.userData.cell) { const cell = o.userData.cell; cell.held = ev.pointerId; rec.cell = cell; squeezeStart(cell); buzz(8); }
+    else if (o && o.userData.creature) { const c = o.userData.creature; if (!c.launch && c.leaving == null && !c.meeting && !c.dying) { c.launch = { t: 0, dur: 0.5, fx: c.x, fz: c.z, tx: c.x, tz: c.z, h: 1.4 }; rustle(0); } }
+  }
+  pointers.set(ev.pointerId, rec);
+});
+cv.addEventListener("pointermove", ev => { const r = pointers.get(ev.pointerId); if (r) { r.x = ev.clientX; r.y = ev.clientY; } });
+function release(id) {
+  const r = pointers.get(id); pointers.delete(id);
+  if (!r || !r.cell) return;
+  const o = r.cell; o.held = null; squeezeStop(o);
+  if (!cells.includes(o)) return;
+  if (o.p >= 1.75) divide(o);
+  else { o.svx += 3 * o.p + 1; o.svy -= 3 * o.p + 1; }
+}
+cv.addEventListener("pointerup", ev => release(ev.pointerId));
+cv.addEventListener("pointercancel", ev => release(ev.pointerId));
+cv.addEventListener("contextmenu", ev => ev.preventDefault());
+let keyCell = null;
+cv.addEventListener("keydown", ev => {
+  if ((ev.key === " " || ev.key === "Enter") && !keyCell && !ev.repeat) {
+    ev.preventDefault(); audio();
+    keyCell = cells.filter(o => o.held == null && !o.fusing).sort((a, b) => Math.hypot(a.x, a.z) - Math.hypot(b.x, b.z))[0] || null;
+    if (keyCell) { keyCell.held = "key"; pointers.set("key", { cell: keyCell }); squeezeStart(keyCell); }
+  }
+});
+cv.addEventListener("keyup", ev => { if ((ev.key === " " || ev.key === "Enter") && keyCell) { keyCell = null; release("key"); } });
+
+const sndBtn = document.getElementById("snd");
+sndBtn.addEventListener("click", () => {
+  soundOn = !soundOn; sndBtn.textContent = soundOn ? "sound on" : "sound off"; sndBtn.setAttribute("aria-pressed", soundOn);
+  if (!soundOn) for (const o of cells) squeezeStop(o); else audio();
+});
+document.getElementById("again").addEventListener("click", reset);
+const hintEl = document.getElementById("hint");
+let hintT = 0;
+function hint(text) { hintEl.textContent = text; hintEl.style.opacity = text ? 1 : 0; hintT = text ? 6 : 0; }
+
+// ---------- loop ----------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now; simT += dt;
+  boil = reduced ? 0 : Math.floor(simT * 7);
+  if (hintT > 0 && splits > 0 && (hintT -= dt) <= 0) hintEl.style.opacity = 0;
+  for (const o of [...cells]) {
+    o.age += dt;
+    if (o.held != null) {
+      o.p = Math.min(2, o.p + dt / 0.65);
+      if (o.p >= 1 && !o.crossed) { o.crossed = true; buzz(12); }
+      if (o.p >= 2 && (o.wait += dt) > 1.4) { for (const [id, r] of pointers) if (r.cell === o) pointers.delete(id); o.held = null; divide(o); continue; }
+      squeezeUpdate(o);
+    } else { o.p = Math.max(0, o.p - dt * 3.5); o.crossed = false; o.wait = 0; }
+    o.svx += (-(o.sx - 1) * 170 - o.svx * 8) * dt; o.sx += o.svx * dt;
+    o.svy += (-(o.sy - 1) * 170 - o.svy * 8) * dt; o.sy += o.svy * dt;
+    o.vx *= Math.exp(-dt * 3); o.vz *= Math.exp(-dt * 3);
+    if (o.fusing) continue;
+    if (o.held == null) { o.x += o.vx * dt; o.z += o.vz * dt; }
+    const b = BOUNDS, m = o.R * 0.9;
+    if (o.x < b.x0 + m) o.vx += (b.x0 + m - o.x) * 14 * dt; if (o.x > b.x1 - m) o.vx -= (o.x - b.x1 + m) * 14 * dt;
+    if (o.z < b.z0 + m) o.vz += (b.z0 + m - o.z) * 14 * dt; if (o.z > b.z1 - m) o.vz -= (o.z - b.z1 + m) * 14 * dt;
+  }
+  for (let i = 0; i < cells.length; i++) for (let j = i + 1; j < cells.length; j++) {
+    const a = cells[i], c = cells[j]; if (a.fusing || c.fusing) continue;
+    const dx = c.x - a.x, dz = c.z - a.z, d = Math.hypot(dx, dz) || 0.01, min = (a.R + c.R) * 1.08;
+    if (d < min) { const f = (min - d) * 10 * dt / d; if (a.held == null) { a.vx -= dx * f; a.vz -= dz * f; } if (c.held == null) { c.vx += dx * f; c.vz += dz * f; } }
+    // with a few cells about, they are drawn to each other and start to clump
+    else if (cells.length >= FUSE_N && d < (a.R + c.R) * 3.2) {
+      const f = 1.8 * dt / d; if (a.held == null) { a.vx += dx * f; a.vz += dz * f; } if (c.held == null) { c.vx -= dx * f; c.vz -= dz * f; }
+    }
+  }
+  for (const c of creatures) if (c.large && !c.forming) for (const o of cells) {
+    if (o.fusing) continue;
+    const dx = o.x - c.x, dz = o.z - c.z, d = Math.hypot(dx, dz) || 0.01, r = o.R + 1.4 * c.p.bulk;
+    if (d < r) { o.vx += dx / d * (r - d) * 6 * dt; o.vz += dz / d * (r - d) * 6 * dt; }
+  }
+  updateClumps(dt); updateFusions(dt);
+  const zt = zoomFor(cells.length + 2 * creatures.filter(k => k.large).length);
+  if (Math.abs(zt - zoom) > 0.001) { zoom += (zt - zoom) * Math.min(1, dt * (reduced ? 4 : 1.1)); fitCamera(); }
+  for (const o of cells) updateCellMesh(o, simT);
+  for (const c of [...creatures]) stepCreature(c, dt);
+  for (const m of [...meetings]) if (!m.ended) updateMeeting(m, dt);
+  for (let i = 0; i < creatures.length; i++) for (let j = i + 1; j < creatures.length; j++) checkMeeting(creatures[i], creatures[j]);
+  updateStains(dt);
+  renderer.render(scene, camera);
+
+  // pencil overlay
+  octx.setTransform(DPR2, 0, 0, DPR2, 0, 0); octx.clearRect(0, 0, innerWidth, innerHeight);
+  octx.lineCap = octx.lineJoin = "round";
+  for (let i = bursts.length - 1; i >= 0; i--) {
+    const B = bursts[i]; B.t += dt; const g = smooth(B.t / 0.28), a = Math.max(0, 1 - B.t / 1.1);
+    if (a <= 0) { bursts.splice(i, 1); continue; }
+    for (let k = 0; k < 11; k++) {
+      const an = k / 11 * TAU + hn(k, B.seed, 1) * 0.3, r0 = B.r * (1.15 + 0.2 * hn(k, B.seed, 2)), r1 = r0 + B.r * (0.8 + 0.5 * hn(k, B.seed, 3)) * g;
+      pline(B.x + Math.cos(an) * r0, B.y + Math.sin(an) * r0, B.x + Math.cos(an) * r1, B.y + Math.sin(an) * r1, B.seed + k, 1.3, 0.6 * a);
+    }
+  }
+  for (const o of cells) {
+    if (o.p <= 0.2) continue;
+    const sh = shapeOf(o), a = Math.min(1, (o.p - 0.2) * 3);
+    const top = new THREE.Vector3(o.x, o.R * sh.ys * 0.98, o.z).addScaledVector(camU, o.R * sh.ys * 1.05).addScaledVector(camR, o.R * sh.xs * 0.55);
+    let [lx, ly] = toScreen(top); const fs = Math.max(22, Math.min(34, U * 0.07));
+    lx = Math.min(innerWidth - 70, Math.max(70, lx + 30)); ly = Math.max(fs + 50, ly - fs);
+    const jx = reduced ? 0 : hn(boil, o.seed, 1) * 1.5 * o.p, jy = reduced ? 0 : hn(boil, o.seed, 2) * 1.5 * o.p;
+    octx.font = `400 ${fs}px Caveat, "Segoe Print", cursive`; octx.textAlign = "center"; octx.textBaseline = "middle";
+    octx.fillStyle = `rgba(52,53,58,${0.8 * a})`; octx.fillText(o.p > 1.75 ? "let go" : "Squish", lx + jx, ly + jy);
+    const tw = octx.measureText("Squish").width / 2 + 8;
+    pline(lx - tw - 10, ly - 4, lx - tw, ly + 1, o.seed + 21, 1.1, 0.7 * a); pline(lx - tw - 10, ly + 6, lx - tw, ly + 1, o.seed + 22, 1.1, 0.7 * a);
+    pline(lx + tw + 10, ly - 4, lx + tw, ly + 1, o.seed + 23, 1.1, 0.7 * a); pline(lx + tw + 10, ly + 6, lx + tw, ly + 1, o.seed + 24, 1.1, 0.7 * a);
+  }
+  requestAnimationFrame(frame);
+}
+addEventListener("resize", resize);
+loadMaps().then(() => {
+  document.getElementById("loading").remove();
+  resize(); reset();
+  requestAnimationFrame(t => { last = t; frame(t); });
+});
+
+})();
+</script>
+</body>
+</html>
